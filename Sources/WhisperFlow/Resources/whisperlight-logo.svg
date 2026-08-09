@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Whisperlight voice waveform</title>
+  <desc id="desc">A simple warm-white voice waveform on a deep dark background.</desc>
+  <rect x="18" y="18" width="476" height="476" rx="128" fill="#15171D"/>
+  <rect x="19.5" y="19.5" width="473" height="473" rx="126.5" fill="none" stroke="#FFFBEA" stroke-opacity=".18" stroke-width="3"/>
+  <path d="M98 256 C128 128 158 128 188 256 C218 384 248 384 278 256 C308 128 338 128 368 256 C398 384 428 384 458 256" fill="none" stroke="#FFFBEA" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
