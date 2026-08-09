@@ -8,12 +8,17 @@ let package = Package(
     ],
     products: [
         .executable(name: "OpenScribe", targets: ["OpenScribe"]),
+        .executable(name: "OpenScribeInstaller", targets: ["OpenScribeInstaller"]),
     ],
     targets: [
         .executableTarget(
             name: "OpenScribe",
             path: "Sources/OpenScribe",
             resources: [.process("Resources")]
+        ),
+        .executableTarget(
+            name: "OpenScribeInstaller",
+            path: "Sources/OpenScribeInstaller"
         ),
         .testTarget(
             name: "OpenScribeTests",

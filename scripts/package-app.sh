@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${CONFIGURATION:-debug}"
+swift build -c "$CONFIG" --package-path "$ROOT" >/dev/null
 BIN_PATH="$(swift build --show-bin-path -c "$CONFIG" --package-path "$ROOT")"
 APP="$ROOT/dist/OpenScribe.app"
 
