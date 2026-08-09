@@ -9,7 +9,8 @@ final class PermissionCenter: ObservableObject {
     @Published private(set) var microphoneStatus: AVAuthorizationStatus = .notDetermined
     @Published private(set) var accessibilityTrusted = false
 
-    private let onboardingSeenKey = "permission-onboarding-seen-v1"
+    private let onboardingSeenKey = "permission-onboarding-seen-v2"
+    private var accessibilityRefreshTask: Task<Void, Never>?
 
     init() {
         refresh()
@@ -21,7 +22,8 @@ final class PermissionCenter: ObservableObject {
 
     func refresh() {
         microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        accessibilityTrusted = AXIsProcessTrusted()
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
+        accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
     }
 
     func requestMicrophonePermission() async {
@@ -43,7 +45,21 @@ final class PermissionCenter: ObservableObject {
 
     func openAccessibilitySettings() {
         openPrivacyPane("Privacy_Accessibility")
+        beginAccessibilityMonitoring()
     }
+    func beginAccessibilityMonitoring() {
+        accessibilityRefreshTask?.cancel()
+        accessibilityRefreshTask = Task { @MainActor [weak self] in
+            for _ in 0..<120 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self else { return }
+                refresh()
+                if accessibilityTrusted { return }
+            }
+        }
+    }
+
 
     func markOnboardingSeen() {
         UserDefaults.standard.set(true, forKey: onboardingSeenKey)
@@ -52,5 +68,8 @@ final class PermissionCenter: ObservableObject {
     private func openPrivacyPane(_ pane: String) {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
         NSWorkspace.shared.open(url)
+    }
+    deinit {
+        accessibilityRefreshTask?.cancel()
     }
 }

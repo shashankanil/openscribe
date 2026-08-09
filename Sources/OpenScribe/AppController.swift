@@ -63,7 +63,6 @@ final class AppController: ObservableObject {
         permissions.refresh()
         NSLog("OpenScribe booted")
         if !permissions.hasSeenOnboarding {
-            permissions.markOnboardingSeen()
             showPermissions()
         } else {
             startHotkeyIfAllowed()
@@ -213,15 +212,18 @@ final class AppController: ObservableObject {
         permissionsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    func dismissPermissions() {
+    func dismissPermissions(markOnboardingComplete: Bool = true) {
         permissions.refresh()
+        if markOnboardingComplete {
+            permissions.markOnboardingSeen()
+        }
         startHotkeyIfAllowed()
         permissionsWindow?.orderOut(nil)
     }
 
     func disablePasteInjectionAndDismissPermissions() {
         updateSettings { $0.pasteIntoFocusedApp = false }
-        dismissPermissions()
+        dismissPermissions(markOnboardingComplete: true)
     }
 
     func refreshPermissions() {
@@ -238,6 +240,17 @@ final class AppController: ObservableObject {
 
     func openAccessibilitySettings() {
         permissions.openAccessibilitySettings()
+    }
+    func restartApplication() {
+        guard let executableURL = Bundle.main.executableURL else { return }
+        let process = Process()
+        process.executableURL = executableURL
+        do {
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            showTransientError("OpenScribe could not restart: \(error.localizedDescription)")
+        }
     }
     private func startHotkeyIfAllowed() {
         guard permissions.accessibilityTrusted else { return }
