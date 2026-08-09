@@ -2,6 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SIGNING_IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+    SIGNING_IDENTITY="$(security find-identity -v -p codesigning | /usr/bin/awk 'match($0, /"[^"]+"/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }')"
+fi
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+    print -u2 "No stable code-signing identity found. Set CODESIGN_IDENTITY or install a signing certificate."
+    exit 1
+fi
 APP="$ROOT/dist/OpenScribe.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppInfo.plist")"
 DMG="$ROOT/dist/OpenScribe-v${VERSION}-macos-arm64.dmg"
@@ -11,15 +19,14 @@ cleanup() {
     rm -rf "$STAGING"
 }
 trap cleanup EXIT
-
-"$ROOT/scripts/package-app.sh" >/dev/null
+CODESIGN_IDENTITY="$SIGNING_IDENTITY" "$ROOT/scripts/package-app.sh" >/dev/null
 BIN_PATH="$(swift build --show-bin-path --package-path "$ROOT")"
 INSTALLER="$ROOT/dist/OpenScribe Installer.app"
 rm -rf "$INSTALLER"
 mkdir -p "$INSTALLER/Contents/MacOS"
 cp "$BIN_PATH/OpenScribeInstaller" "$INSTALLER/Contents/MacOS/OpenScribeInstaller"
 cp "$ROOT/InstallerInfo.plist" "$INSTALLER/Contents/Info.plist"
-codesign --force --deep --sign - "$INSTALLER" >/dev/null
+codesign --force --deep --sign "$SIGNING_IDENTITY" "$INSTALLER" >/dev/null
 
 rm -f "$DMG"
 cp -R "$APP" "$STAGING/OpenScribe.app"
