@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>WhisperFlow</string>
+    <string>OpenScribe</string>
     <key>CFBundleExecutable</key>
-    <string>WhisperFlow</string>
+    <string>OpenScribe</string>
     <key>CFBundleIdentifier</key>
-    <string>org.open-source.whisperflow</string>
+    <string>org.open-source.openscribe</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>WhisperFlow</string>
+    <string>OpenScribe</string>
     <key>CFBundleIconFile</key>
     <string>Whisperlight</string>
     <key>CFBundlePackageType</key>
@@ -25,8 +25,8 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>WhisperFlow needs microphone access to turn your voice into text.</string>
+    <string>OpenScribe needs microphone access to turn your voice into text.</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>WhisperFlow uses Accessibility to paste polished dictation into the focused app.</string>
+    <string>OpenScribe uses Accessibility to paste polished dictation into the focused app.</string>
 </dict>
 </plist>

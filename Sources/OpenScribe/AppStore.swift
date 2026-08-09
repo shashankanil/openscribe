@@ -135,7 +135,7 @@ final class AppStore: ObservableObject {
             let data = try JSONEncoder.whisperFlow.encode(value)
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("WhisperFlow persistence error: %@", error.localizedDescription)
+            NSLog("OpenScribe persistence error: %@", error.localizedDescription)
         }
     }
 }

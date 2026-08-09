@@ -61,7 +61,7 @@ final class AppController: ObservableObject {
         hasBooted = true
         applyTheme(settings.theme)
         permissions.refresh()
-        NSLog("WhisperFlow booted")
+        NSLog("OpenScribe booted")
         if !permissions.hasSeenOnboarding {
             permissions.markOnboardingSeen()
             showPermissions()
@@ -182,7 +182,7 @@ final class AppController: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "WhisperFlow"
+            window.title = "OpenScribe"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
@@ -201,7 +201,7 @@ final class AppController: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "WhisperFlow setup"
+            window.title = "OpenScribe setup"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
@@ -274,7 +274,7 @@ final class AppController: ObservableObject {
             do {
                 try await recorder.prepare()
             } catch {
-                NSLog("WhisperFlow recorder warm-up failed: %@", error.localizedDescription)
+                NSLog("OpenScribe recorder warm-up failed: %@", error.localizedDescription)
             }
         }
     }
@@ -299,7 +299,7 @@ final class AppController: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "WhisperFlow Settings"
+            window.title = "OpenScribe Settings"
             window.titleVisibility = .visible
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: SettingsView(controller: self))
@@ -391,10 +391,10 @@ final class AppController: ObservableObject {
             .appendingPathComponent("Audio", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("WhisperFlow-\(UUID().uuidString).wav")
+            let url = directory.appendingPathComponent("OpenScribe-\(UUID().uuidString).wav")
             try data.write(to: url, options: .atomic)
         } catch {
-            NSLog("WhisperFlow audio retention error: %@", error.localizedDescription)
+            NSLog("OpenScribe audio retention error: %@", error.localizedDescription)
         }
     }
 
@@ -433,7 +433,7 @@ final class AppController: ObservableObject {
                     } catch {
                         cleanupFailure = error
                         cleaned = raw
-                        NSLog("WhisperFlow cleanup failed: %@", error.localizedDescription)
+                        NSLog("OpenScribe cleanup failed: %@", error.localizedDescription)
                     }
                 }
 
@@ -476,7 +476,7 @@ final class AppController: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                NSLog("WhisperFlow processing failed: %@", error.localizedDescription)
+                NSLog("OpenScribe processing failed: %@", error.localizedDescription)
                 fail(with: error)
             }
         }
@@ -493,7 +493,7 @@ final class AppController: ObservableObject {
             return
         }
 
-        NSLog("WhisperFlow capture failed: %@", error.localizedDescription)
+        NSLog("OpenScribe capture failed: %@", error.localizedDescription)
         showTransientError(error.localizedDescription)
     }
 

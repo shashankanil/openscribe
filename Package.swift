@@ -2,23 +2,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "WhisperFlow",
+    name: "OpenScribe",
     platforms: [
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "WhisperFlow", targets: ["WhisperFlow"]),
+        .executable(name: "OpenScribe", targets: ["OpenScribe"]),
     ],
     targets: [
         .executableTarget(
-            name: "WhisperFlow",
-            path: "Sources/WhisperFlow",
+            name: "OpenScribe",
+            path: "Sources/OpenScribe",
             resources: [.process("Resources")]
         ),
         .testTarget(
-            name: "WhisperFlowTests",
-            dependencies: ["WhisperFlow"],
-            path: "Tests/WhisperFlowTests"
+            name: "OpenScribeTests",
+            dependencies: ["OpenScribe"],
+            path: "Tests/OpenScribeTests"
         ),
     ],
     swiftLanguageModes: [.v5]

@@ -39,7 +39,7 @@ enum TextInjectorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .accessibilityPermissionDenied:
-            return "Enable Accessibility for WhisperFlow in System Settings → Privacy & Security → Accessibility."
+            return "Enable Accessibility for OpenScribe in System Settings → Privacy & Security → Accessibility."
         case .clipboardUnavailable:
             return "The clipboard could not be prepared for paste."
         case .keyboardEventUnavailable:

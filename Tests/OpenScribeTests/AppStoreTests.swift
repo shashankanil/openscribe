@@ -1,11 +1,11 @@
 import Foundation
 import XCTest
-@testable import WhisperFlow
+@testable import OpenScribe
 
 @MainActor
 final class AppStoreTests: XCTestCase {
     func testNotesAndSettingsRoundTrip() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("whisperflow-test-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-test-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
 
         let store = AppStore(rootURL: root)
@@ -33,7 +33,7 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(restored.settings.theme, .dark)
     }
     func testNotesPersistSourceApplicationMetadata() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("whisperflow-source-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-source-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
 
         let store = AppStore(rootURL: root)
@@ -76,7 +76,7 @@ final class AppStoreTests: XCTestCase {
         XCTAssertNil(note.sourceBundleIdentifier)
         XCTAssertEqual(note.sourceLabel, "Active app unavailable")
     }
-    func testLegacySettingsDefaultToWhisperFlowTheme() throws {
+    func testLegacySettingsDefaultToWhisperlightTheme() throws {
         let json = """
         {
           "dictationMode": "toggle"
@@ -135,7 +135,7 @@ final class AppStoreTests: XCTestCase {
     }
 
     func testLocalCredentialRoundTrip() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("whisperflow-credentials-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-credentials-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
 
         try CredentialStore.save("test-secret", account: "language-model-api-key", rootURL: root)

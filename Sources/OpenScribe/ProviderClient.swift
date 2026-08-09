@@ -60,11 +60,11 @@ struct ProviderClient {
 
     private func transcribeOpenAICompatible(audio: Data, settings: AppSettings, apiKey: String) async throws -> String {
         let endpoint = try url(base: settings.speechBaseURL, path: "/audio/transcriptions")
-        let boundary = "WhisperFlow-\(UUID().uuidString)"
+        let boundary = "OpenScribe-\(UUID().uuidString)"
         var body = Data()
         body.appendMultipart(boundary: boundary, name: "model", value: settings.speechModel)
         body.appendMultipart(boundary: boundary, name: "response_format", value: "json")
-        body.appendMultipartFile(boundary: boundary, name: "file", filename: "whisperflow.wav", mimeType: "audio/wav", data: audio)
+        body.appendMultipartFile(boundary: boundary, name: "file", filename: "openscribe.wav", mimeType: "audio/wav", data: audio)
         body.append(Data("--\(boundary)--\r\n".utf8))
 
         var request = URLRequest(url: endpoint)
@@ -74,7 +74,7 @@ struct ProviderClient {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if settings.speechProvider == .openRouter {
             request.setValue("https://openscribe.local", forHTTPHeaderField: "HTTP-Referer")
-            request.setValue("Open Scribe", forHTTPHeaderField: "X-Title")
+            request.setValue("OpenScribe", forHTTPHeaderField: "X-Title")
         }
         let data = try await send(request)
         let response = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
@@ -155,8 +155,8 @@ struct ProviderClient {
         var request = try jsonRequest(url: endpoint, payload: payload)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         if settings.languageModelProvider == .openRouter {
-            request.setValue("https://open-source-whisperflow.local", forHTTPHeaderField: "HTTP-Referer")
-            request.setValue("WhisperFlow", forHTTPHeaderField: "X-Title")
+            request.setValue("https://openscribe.local", forHTTPHeaderField: "HTTP-Referer")
+            request.setValue("OpenScribe", forHTTPHeaderField: "X-Title")
         }
         let data = try await send(request)
         let response = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)

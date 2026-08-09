@@ -62,7 +62,7 @@ final class AudioRecorder: ObservableObject {
         }
 
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("whisperflow-\(UUID().uuidString).wav")
+            .appendingPathComponent("openscribe-\(UUID().uuidString).wav")
         let file = try AVAudioFile(forWriting: url, settings: format.settings)
         fileURL = url
         captureState.setFile(file)
@@ -198,7 +198,7 @@ private final class CaptureState: @unchecked Sendable {
         do {
             try file.write(from: buffer)
         } catch {
-            NSLog("WhisperFlow audio write error: %@", error.localizedDescription)
+            NSLog("OpenScribe audio write error: %@", error.localizedDescription)
         }
     }
 

@@ -14,14 +14,14 @@ struct PermissionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("WHISPERFLOW / FIRST RUN")
+                Text("OPENSCRIBE / FIRST RUN")
                     .flowUIFont(size: 10, weight: .semibold)
                     .tracking(1.4)
                     .foregroundStyle(FlowTheme.lavenderDeep)
                 Text("One quiet setup, then just speak.")
                     .flowDisplayFont(size: 34)
                     .foregroundStyle(FlowTheme.ink)
-                Text("WhisperFlow asks for permissions only when they are needed. If one was denied, use the matching System Settings button below instead of restarting the app.")
+                Text("OpenScribe asks for permissions only when they are needed. If one was denied, use the matching System Settings button below instead of restarting the app.")
                     .flowUIFont(size: 13)
                     .foregroundStyle(FlowTheme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)

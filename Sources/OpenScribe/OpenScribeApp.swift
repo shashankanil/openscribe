@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct WhisperFlowApp: App {
+struct OpenScribeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = AppController.shared
 
@@ -58,12 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if CommandLine.arguments.contains("--bootstrap-openrouter-key") {
             maintenanceMode = true
-            let key = ProcessInfo.processInfo.environment["WHISPERFLOW_BOOTSTRAP_KEY"] ?? ""
+            let key = ProcessInfo.processInfo.environment["OPENSCRIBE_BOOTSTRAP_KEY"] ?? ""
             do {
                 try CredentialStore.save(key, account: CredentialKey.languageModel.rawValue)
-                NSLog("WhisperFlow credential bootstrap completed")
+                NSLog("OpenScribe credential bootstrap completed")
             } catch {
-                NSLog("WhisperFlow credential bootstrap failed: %@", error.localizedDescription)
+                NSLog("OpenScribe credential bootstrap failed: %@", error.localizedDescription)
             }
             NSApp.terminate(nil)
             return
@@ -91,7 +91,7 @@ struct MenuBarView: View {
             HStack(spacing: 9) {
                 WhisperlightLogo(size: 30)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("WhisperFlow")
+                    Text("OpenScribe")
                         .flowUIFont(size: 13, weight: .semibold)
                         .foregroundStyle(FlowTheme.ink)
                         .lineLimit(1)
@@ -129,7 +129,7 @@ struct MenuBarView: View {
                     .flowPill()
             }
 
-            Button("Quit WhisperFlow") { NSApp.terminate(nil) }
+            Button("Quit OpenScribe") { NSApp.terminate(nil) }
                 .buttonStyle(FlowQuietButtonStyle())
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
