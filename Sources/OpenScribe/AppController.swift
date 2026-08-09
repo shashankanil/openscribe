@@ -468,12 +468,16 @@ final class AppController: ObservableObject {
 
                 if settings.pasteIntoFocusedApp {
                     do {
-                        try TextInjector.paste(note.displayText)
+                        try TextInjector.paste(note.displayText, into: sourceBundleIdentifier)
                     } catch {
                         permissions.refresh()
-                        showTransientError("Saved · paste permission needed")
-                        if let injectorError = error as? TextInjectorError,
-                           case .accessibilityPermissionDenied = injectorError {
+                        let needsPermission = (error as? TextInjectorError).map {
+                            if case .accessibilityPermissionDenied = $0 { return true }
+                            return false
+                        } ?? false
+                        NSLog("OpenScribe paste failed: %@", error.localizedDescription)
+                        showTransientError(needsPermission ? "Saved · paste permission needed" : "Saved · paste failed")
+                        if needsPermission {
                             showPermissions()
                         }
                     }
