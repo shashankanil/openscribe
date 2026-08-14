@@ -9,11 +9,9 @@ final class AudioRecorder: ObservableObject {
     @Published private(set) var inputLevels = Array(repeating: Float(0.04), count: 11)
 
     private let engine = AVAudioEngine()
-    private let captureState = CaptureState()
-    private var fileURL: URL?
+    private let chunkStore = AudioChunkStore()
     private var startedAt: Date?
     private var tapInstalled = false
-    private var prepareTask: Task<Void, Error>?
 
     var duration: TimeInterval {
         guard let startedAt else { return 0 }
@@ -21,85 +19,15 @@ final class AudioRecorder: ObservableObject {
     }
 
     init() {
-        captureState.onLevel = { [weak self] level in
+        chunkStore.onLevel = { [weak self] level in
             DispatchQueue.main.async { [weak self] in
                 self?.receiveMeterLevel(level)
             }
         }
     }
 
-    func prepare() async throws {
-        if engine.isRunning && tapInstalled {
-            return
-        }
-        if let prepareTask {
-            try await prepareTask.value
-            return
-        }
-
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try await self.configureAndStartEngine()
-        }
-        prepareTask = task
-        do {
-            try await task.value
-            prepareTask = nil
-        } catch {
-            prepareTask = nil
-            throw error
-        }
-    }
-
     func start() async throws {
         guard !isRecording else { return }
-        try await prepare()
-
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw RecorderError.noInputDevice
-        }
-
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("openscribe-\(UUID().uuidString).wav")
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        fileURL = url
-        captureState.setFile(file)
-        startedAt = Date()
-        inputLevel = 0
-        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
-        isRecording = true
-    }
-
-    func stop() throws -> (audio: Data, duration: TimeInterval) {
-        guard isRecording else { throw RecorderError.notRecording }
-        let capturedDuration = duration
-        isRecording = false
-        captureState.setFile(nil)
-        inputLevel = 0
-        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
-
-        guard let fileURL else { throw RecorderError.emptyRecording }
-        self.fileURL = nil
-        let data = try Data(contentsOf: fileURL)
-        try? FileManager.default.removeItem(at: fileURL)
-        guard !data.isEmpty else { throw RecorderError.emptyRecording }
-        return (data, capturedDuration)
-    }
-
-    func cancel() {
-        isRecording = false
-        captureState.setFile(nil)
-        inputLevel = 0
-        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
-        if let fileURL {
-            try? FileManager.default.removeItem(at: fileURL)
-        }
-        fileURL = nil
-    }
-
-    private func configureAndStartEngine() async throws {
         let granted = await requestPermission()
         guard granted else { throw RecorderError.microphonePermissionDenied }
 
@@ -109,25 +37,75 @@ final class AudioRecorder: ObservableObject {
             throw RecorderError.noInputDevice
         }
 
-        if !tapInstalled {
-            let state = captureState
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openscribe-recording-\(UUID().uuidString)", isDirectory: true)
+        try chunkStore.begin(format: format, directoryURL: directory)
+        inputLevel = 0
+        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
+        isRecording = true
+        startedAt = Date()
+
+        do {
+            let state = chunkStore
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
                 state.updateMeter(Self.level(from: buffer))
-                state.write(buffer)
+                state.append(buffer)
             }
             tapInstalled = true
-        }
-
-        engine.prepare()
-        do {
-            if !engine.isRunning {
-                try engine.start()
-            }
+            engine.prepare()
+            try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
+            isRecording = false
+            chunkStore.cancel()
+            stopEngine()
+            startedAt = nil
             throw error
         }
+    }
+
+    func stop() throws -> RecordedAudio {
+        guard isRecording else { throw RecorderError.notRecording }
+        let capturedDuration = duration
+        isRecording = false
+        let files = chunkStore.finish()
+        stopEngine()
+        inputLevel = 0
+        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
+        startedAt = nil
+
+        if files.hadWriteError {
+            try? FileManager.default.removeItem(at: files.directoryURL)
+            throw RecorderError.audioWriteFailed
+        }
+        guard !files.chunkURLs.isEmpty else {
+            try? FileManager.default.removeItem(at: files.directoryURL)
+            throw RecorderError.emptyRecording
+        }
+        return RecordedAudio(
+            chunkURLs: files.chunkURLs,
+            directoryURL: files.directoryURL,
+            duration: capturedDuration
+        )
+    }
+
+    func cancel() {
+        isRecording = false
+        chunkStore.cancel()
+        stopEngine()
+        inputLevel = 0
+        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
+        startedAt = nil
+    }
+
+    private func stopEngine() {
+        if engine.isRunning {
+            engine.stop()
+        }
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        engine.reset()
     }
 
     private func receiveMeterLevel(_ level: Float) {
@@ -179,44 +157,13 @@ final class AudioRecorder: ObservableObject {
     }
 }
 
-private final class CaptureState: @unchecked Sendable {
-    private let lock = NSLock()
-    private var file: AVAudioFile?
-    private var lastMeterDelivery = Date.distantPast
-    var onLevel: ((Float) -> Void)?
-
-    func setFile(_ file: AVAudioFile?) {
-        lock.lock()
-        self.file = file
-        lock.unlock()
-    }
-
-    func write(_ buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let file else { return }
-        do {
-            try file.write(from: buffer)
-        } catch {
-            NSLog("OpenScribe audio write error: %@", error.localizedDescription)
-        }
-    }
-
-    func updateMeter(_ level: Float) {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = Date()
-        guard now.timeIntervalSince(lastMeterDelivery) >= 0.03 else { return }
-        lastMeterDelivery = now
-        onLevel?(level)
-    }
-}
 
 enum RecorderError: LocalizedError {
     case microphonePermissionDenied
     case noInputDevice
     case notRecording
     case emptyRecording
+    case audioWriteFailed
 
     var errorDescription: String? {
         switch self {
@@ -224,6 +171,7 @@ enum RecorderError: LocalizedError {
         case .noInputDevice: return "No microphone input is available."
         case .notRecording: return "There is no active recording."
         case .emptyRecording: return "The recording did not contain audio."
+        case .audioWriteFailed: return "OpenScribe could not store the recording."
         }
     }
 }

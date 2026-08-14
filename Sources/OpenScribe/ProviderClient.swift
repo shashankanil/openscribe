@@ -6,6 +6,7 @@ struct ProviderClient {
         case missingAPIKey
         case http(status: Int, message: String)
         case malformedResponse
+        case audioFile(message: String)
         case provider(message: String)
 
         var errorDescription: String? {
@@ -14,24 +15,33 @@ struct ProviderClient {
             case .missingAPIKey: return "Add an API key in Settings before recording."
             case let .http(status, message): return "Provider request failed (HTTP \(status)): \(message)"
             case .malformedResponse: return "The provider returned an unreadable response."
+            case let .audioFile(message): return message
             case let .provider(message): return message
             }
         }
     }
 
-    func transcribe(audio: Data, settings: AppSettings, apiKey: String) async throws -> String {
+    func transcribe(recording: RecordedAudio, settings: AppSettings, apiKey: String) async throws -> [String] {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ClientError.missingAPIKey
         }
 
-        switch settings.speechProvider {
-        case .deepgram:
-            return try await transcribeWithDeepgram(audio: audio, settings: settings, apiKey: apiKey)
-        case .assemblyAI:
-            return try await transcribeWithAssemblyAI(audio: audio, settings: settings, apiKey: apiKey)
-        case .openRouter, .openAI, .groq, .custom:
-            return try await transcribeOpenAICompatible(audio: audio, settings: settings, apiKey: apiKey)
+        var transcripts: [String] = []
+        transcripts.reserveCapacity(recording.chunkURLs.count)
+        for chunkURL in recording.chunkURLs {
+            try Task.checkCancellation()
+            let text = try await transcribe(
+                audioFile: chunkURL,
+                settings: settings,
+                apiKey: apiKey
+            )
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                transcripts.append(trimmed)
+            }
         }
+        guard !transcripts.isEmpty else { throw ClientError.malformedResponse }
+        return transcripts
     }
 
     func cleanTranscript(_ text: String, settings: AppSettings, apiKey: String) async throws -> String {
@@ -58,33 +68,54 @@ struct ProviderClient {
         }
     }
 
-    private func transcribeOpenAICompatible(audio: Data, settings: AppSettings, apiKey: String) async throws -> String {
+    private func transcribe(
+        audioFile: URL,
+        settings: AppSettings,
+        apiKey: String
+    ) async throws -> String {
+        switch settings.speechProvider {
+        case .deepgram:
+            return try await transcribeWithDeepgram(audioFile: audioFile, settings: settings, apiKey: apiKey)
+        case .assemblyAI:
+            return try await transcribeWithAssemblyAI(audioFile: audioFile, settings: settings, apiKey: apiKey)
+        case .openRouter, .openAI, .groq, .custom:
+            return try await transcribeOpenAICompatible(audioFile: audioFile, settings: settings, apiKey: apiKey)
+        }
+    }
+
+    private func transcribeOpenAICompatible(
+        audioFile: URL,
+        settings: AppSettings,
+        apiKey: String
+    ) async throws -> String {
         let endpoint = try url(base: settings.speechBaseURL, path: "/audio/transcriptions")
         let boundary = "OpenScribe-\(UUID().uuidString)"
-        var body = Data()
-        body.appendMultipart(boundary: boundary, name: "model", value: settings.speechModel)
-        body.appendMultipart(boundary: boundary, name: "response_format", value: "json")
-        body.appendMultipartFile(boundary: boundary, name: "file", filename: "openscribe.wav", mimeType: "audio/wav", data: audio)
-        body.append(Data("--\(boundary)--\r\n".utf8))
+        let bodyURL = try makeMultipartBody(
+            audioFile: audioFile,
+            boundary: boundary,
+            model: settings.speechModel
+        )
+        defer { try? FileManager.default.removeItem(at: bodyURL) }
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.httpBody = body
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if settings.speechProvider == .openRouter {
             request.setValue("https://openscribe.local", forHTTPHeaderField: "HTTP-Referer")
             request.setValue("OpenScribe", forHTTPHeaderField: "X-Title")
         }
-        let data = try await send(request)
+        let data = try await send(request, bodyFile: bodyURL)
         let response = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
-        guard let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-            throw ClientError.malformedResponse
-        }
-        return text
+        guard let text = response.text else { throw ClientError.malformedResponse }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func transcribeWithDeepgram(audio: Data, settings: AppSettings, apiKey: String) async throws -> String {
+    private func transcribeWithDeepgram(
+        audioFile: URL,
+        settings: AppSettings,
+        apiKey: String
+    ) async throws -> String {
         let baseEndpoint = try url(base: settings.speechBaseURL, path: "/listen")
         var components = URLComponents(url: baseEndpoint, resolvingAgainstBaseURL: false)
         components?.queryItems = [
@@ -95,25 +126,27 @@ struct ProviderClient {
         guard let endpoint = components?.url else { throw ClientError.invalidURL }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.httpBody = audio
         request.setValue(apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
-        let data = try await send(request)
+        let data = try await send(request, bodyFile: audioFile)
         let response = try JSONDecoder().decode(DeepgramResponse.self, from: data)
-        guard let text = response.results?.channels?.first?.alternatives?.first?.transcript, !text.isEmpty else {
+        guard let text = response.results?.channels?.first?.alternatives?.first?.transcript else {
             throw ClientError.malformedResponse
         }
-        return text
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func transcribeWithAssemblyAI(audio: Data, settings: AppSettings, apiKey: String) async throws -> String {
+    private func transcribeWithAssemblyAI(
+        audioFile: URL,
+        settings: AppSettings,
+        apiKey: String
+    ) async throws -> String {
         let uploadURL = try url(base: settings.speechBaseURL, path: "/upload")
         var uploadRequest = URLRequest(url: uploadURL)
         uploadRequest.httpMethod = "POST"
-        uploadRequest.httpBody = audio
         uploadRequest.setValue(apiKey, forHTTPHeaderField: "Authorization")
         uploadRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        let uploadData = try await send(uploadRequest)
+        let uploadData = try await send(uploadRequest, bodyFile: audioFile)
         let upload = try JSONDecoder().decode(AssemblyUploadResponse.self, from: uploadData)
 
         let transcriptURL = try url(base: settings.speechBaseURL, path: "/transcript")
@@ -136,8 +169,12 @@ struct ProviderClient {
             pollRequest.setValue(apiKey, forHTTPHeaderField: "Authorization")
             let pollData = try await send(pollRequest)
             let result = try JSONDecoder().decode(AssemblyTranscriptResponse.self, from: pollData)
-            if result.status == "completed", let text = result.text, !text.isEmpty { return text }
-            if result.status == "error" { throw ClientError.provider(message: result.error ?? "AssemblyAI could not transcribe the recording.") }
+            if result.status == "completed", let text = result.text {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if result.status == "error" {
+                throw ClientError.provider(message: result.error ?? "AssemblyAI could not transcribe the recording.")
+            }
         }
         throw ClientError.provider(message: "AssemblyAI transcription timed out.")
     }
@@ -201,6 +238,43 @@ struct ProviderClient {
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func makeMultipartBody(audioFile: URL, boundary: String, model: String) throws -> URL {
+        guard FileManager.default.fileExists(atPath: audioFile.path) else {
+            throw ClientError.audioFile(message: "The recorded audio file is no longer available.")
+        }
+        let bodyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openscribe-upload-\(UUID().uuidString).multipart")
+        guard FileManager.default.createFile(atPath: bodyURL.path, contents: nil) else {
+            throw ClientError.audioFile(message: "OpenScribe could not prepare the audio upload.")
+        }
+
+        let output = try FileHandle(forWritingTo: bodyURL)
+        let input = try FileHandle(forReadingFrom: audioFile)
+        defer {
+            input.closeFile()
+            output.closeFile()
+        }
+
+        output.write(Data("--\(boundary)\r\n".utf8))
+        output.write(Data("Content-Disposition: form-data; name=\"model\"\r\n\r\n".utf8))
+        output.write(Data("\(model)\r\n".utf8))
+        output.write(Data("--\(boundary)\r\n".utf8))
+        output.write(Data("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".utf8))
+        output.write(Data("json\r\n".utf8))
+        output.write(Data("--\(boundary)\r\n".utf8))
+        output.write(Data("Content-Disposition: form-data; name=\"file\"; filename=\"openscribe.wav\"\r\n".utf8))
+        output.write(Data("Content-Type: audio/wav\r\n\r\n".utf8))
+
+        while true {
+            let chunk = input.readData(ofLength: 64 * 1024)
+            if chunk.isEmpty { break }
+            output.write(chunk)
+        }
+
+        output.write(Data("\r\n--\(boundary)--\r\n".utf8))
+        return bodyURL
+    }
+
     private func url(base: String, path: String) throws -> URL {
         let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(trimmed)\(path)") else { throw ClientError.invalidURL }
@@ -217,6 +291,15 @@ struct ProviderClient {
 
     private func send(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await URLSession.shared.data(for: request)
+        return try validate(data: data, response: response)
+    }
+
+    private func send(_ request: URLRequest, bodyFile: URL) async throws -> Data {
+        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: bodyFile)
+        return try validate(data: data, response: response)
+    }
+
+    private func validate(data: Data, response: URLResponse) throws -> Data {
         guard let http = response as? HTTPURLResponse else { throw ClientError.malformedResponse }
         guard (200..<300).contains(http.statusCode) else {
             let message = String(data: data, encoding: .utf8) ?? "Unknown provider error"
@@ -277,18 +360,3 @@ private struct GeminiResponse: Decodable {
     let candidates: [Candidate]?
 }
 
-private extension Data {
-    mutating func appendMultipart(boundary: String, name: String, value: String) {
-        append(Data("--\(boundary)\r\n".utf8))
-        append(Data("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8))
-        append(Data("\(value)\r\n".utf8))
-    }
-
-    mutating func appendMultipartFile(boundary: String, name: String, filename: String, mimeType: String, data: Data) {
-        append(Data("--\(boundary)\r\n".utf8))
-        append(Data("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n".utf8))
-        append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
-        append(data)
-        append(Data("\r\n".utf8))
-    }
-}

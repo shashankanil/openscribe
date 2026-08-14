@@ -137,14 +137,13 @@ final class AppController: ObservableObject {
             recordingSourceApplication = nil
             recordingSourceBundleIdentifier = nil
             if store.settings.saveRawAudio {
-                retainAudio(result.audio)
+                retainAudio(result)
             }
             capturePhase = .transcribing
             captureHint = "Transcribing…"
             showOverlay()
             processRecording(
-                audio: result.audio,
-                duration: result.duration,
+                recording: result,
                 sourceApplication: sourceApplication,
                 sourceBundleIdentifier: sourceBundleIdentifier
             )
@@ -258,7 +257,6 @@ final class AppController: ObservableObject {
             hotkeyStarted = true
             configureHotkey()
         }
-        primeRecorder()
     }
 
     private func configureHotkey() {
@@ -280,17 +278,6 @@ final class AppController: ObservableObject {
         )
     }
 
-    private func primeRecorder() {
-        guard permissions.microphoneReady else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await recorder.prepare()
-            } catch {
-                NSLog("OpenScribe recorder warm-up failed: %@", error.localizedDescription)
-            }
-        }
-    }
 
     func restartHotkey() {
         guard hotkeyStarted else { return }
@@ -396,24 +383,27 @@ final class AppController: ObservableObject {
         store.clearNotes()
         objectWillChange.send()
     }
-    private func retainAudio(_ data: Data) {
+    private func retainAudio(_ recording: RecordedAudio) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        let directory = support
+        let audioRoot = support
             .appendingPathComponent("WhisperFlow", isDirectory: true)
             .appendingPathComponent("Audio", isDirectory: true)
+        let directory = audioRoot.appendingPathComponent("OpenScribe-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("OpenScribe-\(UUID().uuidString).wav")
-            try data.write(to: url, options: .atomic)
+            for (index, chunkURL) in recording.chunkURLs.enumerated() {
+                let filename = String(format: "chunk-%05d.wav", index)
+                let destination = directory.appendingPathComponent(filename)
+                try FileManager.default.copyItem(at: chunkURL, to: destination)
+            }
         } catch {
             NSLog("OpenScribe audio retention error: %@", error.localizedDescription)
         }
     }
 
     private func processRecording(
-        audio: Data,
-        duration: TimeInterval,
+        recording: RecordedAudio,
         sourceApplication: String?,
         sourceBundleIdentifier: String?
     ) {
@@ -421,11 +411,23 @@ final class AppController: ObservableObject {
         let speechKey = credential(for: .speech)
         let languageKey = credential(for: .languageModel)
         processingTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { processingTask = nil }
+            guard let self else {
+                recording.cleanup()
+                return
+            }
+            defer {
+                recording.cleanup()
+                self.processingTask = nil
+            }
             do {
-                let raw = try await providerClient.transcribe(audio: audio, settings: speechSettings, apiKey: speechKey)
+                let rawChunks = try await providerClient.transcribe(
+                    recording: recording,
+                    settings: speechSettings,
+                    apiKey: speechKey
+                )
                 try Task.checkCancellation()
+                let raw = rawChunks.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 currentTranscript = raw
 
                 var cleaned = raw
@@ -434,26 +436,33 @@ final class AppController: ObservableObject {
                     capturePhase = .cleaning
                     captureHint = "Polishing…"
                     showOverlay()
-                    do {
-                        cleaned = try await providerClient.cleanTranscript(
-                            raw,
-                            settings: speechSettings,
-                            apiKey: languageKey
-                        )
-                        try Task.checkCancellation()
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch {
-                        cleanupFailure = error
-                        cleaned = raw
-                        NSLog("OpenScribe cleanup failed: %@", error.localizedDescription)
+                    var cleanedChunks: [String] = []
+                    cleanedChunks.reserveCapacity(rawChunks.count)
+                    for (index, rawChunk) in rawChunks.enumerated() {
+                        do {
+                            let cleanedChunk = try await providerClient.cleanTranscript(
+                                rawChunk,
+                                settings: speechSettings,
+                                apiKey: languageKey
+                            )
+                            cleanedChunks.append(cleanedChunk)
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            cleanupFailure = error
+                            cleanedChunks.append(contentsOf: rawChunks[index...])
+                            break
+                        }
                     }
+                    cleaned = cleanedChunks.joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    try Task.checkCancellation()
                 }
 
                 let note = store.addNote(
                     rawText: raw,
                     cleanedText: cleaned,
-                    duration: duration,
+                    duration: recording.duration,
                     sourceApplication: sourceApplication,
                     sourceBundleIdentifier: sourceBundleIdentifier
                 )
