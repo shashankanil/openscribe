@@ -14,7 +14,8 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     exit 1
 fi
 
-APP="$ROOT/dist/OpenScribe.app"
+OUTPUT_DIR="${PACKAGE_OUTPUT_DIR:-$ROOT/dist}"
+APP="$OUTPUT_DIR/OpenScribe.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH/OpenScribe" "$APP/Contents/MacOS/OpenScribe"

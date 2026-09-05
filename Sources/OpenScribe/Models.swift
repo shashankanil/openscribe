@@ -27,6 +27,7 @@ enum SpeechProvider: String, Codable, CaseIterable, Identifiable {
     case groq
     case deepgram
     case assemblyAI
+    case mistral
     case custom
 
     var id: String { rawValue }
@@ -37,6 +38,7 @@ enum SpeechProvider: String, Codable, CaseIterable, Identifiable {
         case .openAI: return "OpenAI"
         case .groq: return "Groq"
         case .deepgram: return "Deepgram"
+        case .mistral: return "Mistral"
         case .assemblyAI: return "AssemblyAI"
         case .custom: return "Custom OpenAI-compatible"
         }
@@ -48,6 +50,7 @@ enum SpeechProvider: String, Codable, CaseIterable, Identifiable {
         case .openAI: return "https://api.openai.com/v1"
         case .groq: return "https://api.groq.com/openai/v1"
         case .deepgram: return "https://api.deepgram.com/v1"
+        case .mistral: return "https://api.mistral.ai/v1"
         case .assemblyAI: return "https://api.assemblyai.com/v2"
         case .custom: return "https://example.com/v1"
         }
@@ -59,6 +62,7 @@ enum SpeechProvider: String, Codable, CaseIterable, Identifiable {
         case .openAI: return "gpt-4o-mini-transcribe"
         case .groq: return "whisper-large-v3-turbo"
         case .deepgram: return "nova-3"
+        case .mistral: return "voxtral-mini-transcribe-realtime-2602"
         case .assemblyAI: return "best"
         case .custom: return "whisper-1"
         }
@@ -255,6 +259,22 @@ struct AppSettings: Codable, Equatable {
 
     var writingTone: WritingTone = .natural
     var customVocabulary: [String] = []
+    var correctionRules: [CorrectionRule] = []
+    var cleanupStrength: CleanupStrength = .clear
+
+    var automaticStreaming = true
+    var dictationLiveTranscription = true
+    var meetingLiveTranscription = true
+    var calendarEnabled = false
+    var calendarIDs: [String] = []
+    var calendarExcludedTitles: [String] = []
+    var calendarAutoStart = true
+    var calendarMeetingsOnly = true
+    var calendarSummarize = true
+    var microphoneDeviceUID = ""
+    var interactionSounds = true
+    var snippets: [VoiceSnippet] = []
+    var appWritingTones: [String: WritingTone] = [:]
 
     var cleanupEnabled = true
     var pasteIntoFocusedApp = true
@@ -270,10 +290,12 @@ struct AppSettings: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
         case languageModelProvider, languageModelBaseURL, languageModel
-        case writingTone, customVocabulary
+        case dictationLiveTranscription, meetingLiveTranscription, automaticStreaming
+        case calendarEnabled, calendarIDs, calendarExcludedTitles, calendarAutoStart, calendarMeetingsOnly, calendarSummarize
+        case writingTone, customVocabulary, correctionRules, cleanupStrength
         case cleanupEnabled, pasteIntoFocusedApp, saveRawAudio
         case showOverlayWhenIdle, shortcutDisplay, shortcutKeyCode, shortcutModifiers, overlayPosition
-        case dictationMode, theme
+        case dictationMode, theme, interactionSounds, snippets, appWritingTones, microphoneDeviceUID
     }
 
     init() {}
@@ -298,6 +320,8 @@ struct AppSettings: Codable, Equatable {
         languageModelBaseURL = try container.decodeIfPresent(String.self, forKey: .languageModelBaseURL) ?? languageModelProvider.defaultBaseURL
         writingTone = try container.decodeIfPresent(WritingTone.self, forKey: .writingTone) ?? .natural
         customVocabulary = try container.decodeIfPresent([String].self, forKey: .customVocabulary) ?? []
+        correctionRules = try container.decodeIfPresent([CorrectionRule].self, forKey: .correctionRules) ?? []
+        cleanupStrength = try container.decodeIfPresent(CleanupStrength.self, forKey: .cleanupStrength) ?? .clear
         languageModel = try container.decodeIfPresent(String.self, forKey: .languageModel) ?? languageModelProvider.defaultModel
         cleanupEnabled = try container.decodeIfPresent(Bool.self, forKey: .cleanupEnabled) ?? true
         pasteIntoFocusedApp = try container.decodeIfPresent(Bool.self, forKey: .pasteIntoFocusedApp) ?? true
@@ -308,6 +332,19 @@ struct AppSettings: Codable, Equatable {
         shortcutModifiers = try container.decodeIfPresent(UInt.self, forKey: .shortcutModifiers) ?? NSEvent.ModifierFlags.option.rawValue
         overlayPosition = try container.decodeIfPresent(String.self, forKey: .overlayPosition) ?? "bottom-center"
         dictationMode = try container.decodeIfPresent(DictationMode.self, forKey: .dictationMode) ?? .toggle
+        automaticStreaming = try container.decodeIfPresent(Bool.self, forKey: .automaticStreaming) ?? true
+        dictationLiveTranscription = try container.decodeIfPresent(Bool.self, forKey: .dictationLiveTranscription) ?? true
+        meetingLiveTranscription = try container.decodeIfPresent(Bool.self, forKey: .meetingLiveTranscription) ?? true
+        calendarEnabled = try container.decodeIfPresent(Bool.self, forKey: .calendarEnabled) ?? false
+        calendarIDs = try container.decodeIfPresent([String].self, forKey: .calendarIDs) ?? []
+        calendarExcludedTitles = try container.decodeIfPresent([String].self, forKey: .calendarExcludedTitles) ?? []
+        calendarAutoStart = try container.decodeIfPresent(Bool.self, forKey: .calendarAutoStart) ?? true
+        calendarMeetingsOnly = try container.decodeIfPresent(Bool.self, forKey: .calendarMeetingsOnly) ?? true
+        calendarSummarize = try container.decodeIfPresent(Bool.self, forKey: .calendarSummarize) ?? true
+        microphoneDeviceUID = try container.decodeIfPresent(String.self, forKey: .microphoneDeviceUID) ?? ""
+        interactionSounds = try container.decodeIfPresent(Bool.self, forKey: .interactionSounds) ?? true
+        snippets = try container.decodeIfPresent([VoiceSnippet].self, forKey: .snippets) ?? []
+        appWritingTones = try container.decodeIfPresent([String: WritingTone].self, forKey: .appWritingTones) ?? [:]
         theme = try container.decodeIfPresent(FlowThemeVariant.self, forKey: .theme) ?? .whisperFlow
     }
 }
@@ -347,7 +384,22 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     }
 }
 
-struct ProviderCredentialKeys {
-    static let speech = "speech-api-key"
-    static let languageModel = "language-model-api-key"
+struct VoiceSnippet: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var trigger: String
+    var replacement: String
+
+    // Match a complete utterance so ordinary sentences never expand unexpectedly.
+    static func expansion(for text: String, snippets: [VoiceSnippet]) -> String? {
+        let key = normalized(text)
+        guard !key.isEmpty else { return nil }
+        return snippets.first {
+            normalized($0.trigger) == key && !$0.replacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }?.replacement
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+    }
 }

@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Combine
 import Foundation
 
@@ -12,6 +13,9 @@ final class AudioRecorder: ObservableObject {
     private let chunkStore = AudioChunkStore()
     private var startedAt: Date?
     private var tapInstalled = false
+    private var preservesFiles = false
+    var onInterruption: ((Error) -> Void)?
+    private var configurationObserver: NSObjectProtocol?
 
     var duration: TimeInterval {
         guard let startedAt else { return 0 }
@@ -19,6 +23,15 @@ final class AudioRecorder: ObservableObject {
     }
 
     init() {
+        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isRecording, !self.engine.isRunning else { return }
+                self.onInterruption?(RecorderError.noInputDevice)
+            }
+        }
+        chunkStore.onError = { [weak self] error in
+            Task { @MainActor in self?.onInterruption?(error) }
+        }
         chunkStore.onLevel = { [weak self] level in
             DispatchQueue.main.async { [weak self] in
                 self?.receiveMeterLevel(level)
@@ -26,19 +39,28 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    func start() async throws {
+    func start(directoryURL: URL? = nil, timelineOrigin: TimeInterval? = nil, deviceUID: String = "", liveSink: LiveAudioSink? = nil) async throws {
         guard !isRecording else { return }
         let granted = await requestPermission()
+        try Task.checkCancellation()
         guard granted else { throw RecorderError.microphonePermissionDenied }
 
+        preservesFiles = directoryURL != nil
         let input = engine.inputNode
+        do {
+            let chosenID = deviceUID.isEmpty ? MicrophoneDevice.defaultDeviceID() : MicrophoneDevice.available().first(where: { $0.id == deviceUID })?.deviceID
+            guard var id = chosenID, let unit = input.audioUnit else { throw RecorderError.noInputDevice }
+            guard AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                       &id, UInt32(MemoryLayout.size(ofValue: id))) == noErr else { throw RecorderError.noInputDevice }
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw RecorderError.noInputDevice
         }
 
-        let directory = FileManager.default.temporaryDirectory
+        let directory = directoryURL ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("openscribe-recording-\(UUID().uuidString)", isDirectory: true)
+        chunkStore.liveSink = liveSink
         try chunkStore.begin(format: format, directoryURL: directory)
         inputLevel = 0
         inputLevels = Array(repeating: 0.04, count: inputLevels.count)
@@ -47,9 +69,10 @@ final class AudioRecorder: ObservableObject {
 
         do {
             let state = chunkStore
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, time in
                 state.updateMeter(Self.level(from: buffer))
-                state.append(buffer)
+                let timestamp = timelineOrigin.map { AVAudioTime.seconds(forHostTime: time.hostTime) - $0 }
+                state.append(buffer, at: timestamp)
             }
             tapInstalled = true
             engine.prepare()
@@ -74,11 +97,11 @@ final class AudioRecorder: ObservableObject {
         startedAt = nil
 
         if files.hadWriteError {
-            try? FileManager.default.removeItem(at: files.directoryURL)
+            if !preservesFiles { try? FileManager.default.removeItem(at: files.directoryURL) }
             throw RecorderError.audioWriteFailed
         }
         guard !files.chunkURLs.isEmpty else {
-            try? FileManager.default.removeItem(at: files.directoryURL)
+            if !preservesFiles { try? FileManager.default.removeItem(at: files.directoryURL) }
             throw RecorderError.emptyRecording
         }
         return RecordedAudio(
@@ -141,6 +164,8 @@ final class AudioRecorder: ObservableObject {
         let rms = sqrt(sum / Float(frameCount))
         return min(1, max(0, (rms - 0.003) * 18))
     }
+
+    deinit { if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) } }
 
     private func requestPermission() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {

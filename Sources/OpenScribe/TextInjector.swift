@@ -4,7 +4,7 @@ import Foundation
 
 enum TextInjector {
     @MainActor
-    static func paste(_ text: String, into targetBundleIdentifier: String?) throws {
+    static func paste(_ text: String, into targetBundleIdentifier: String?) async throws {
         guard !text.isEmpty else { return }
 
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
@@ -13,43 +13,49 @@ enum TextInjector {
         }
 
         let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string)
+        let targetApplication = targetApplication(for: targetBundleIdentifier)
+        if targetBundleIdentifier != nil && targetApplication == nil {
+            throw TextInjectorError.targetApplicationUnavailable
+        }
+        let previous: [NSPasteboardItem] = pasteboard.pasteboardItems?.map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
+            }
+            return copy
+        } ?? []
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
             throw TextInjectorError.clipboardUnavailable
         }
 
-        let targetApplication = targetApplication(for: targetBundleIdentifier)
+        let changeCount = pasteboard.changeCount
         if let targetApplication {
             guard targetApplication.activate(options: [.activateAllWindows]) else {
-                restore(pasteboard, previous: previous)
+                restore(pasteboard, previous: previous, changeCount: changeCount)
                 throw TextInjectorError.targetApplicationUnavailable
             }
         }
 
         guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else {
-            restore(pasteboard, previous: previous)
+            restore(pasteboard, previous: previous, changeCount: changeCount)
             throw TextInjectorError.keyboardEventUnavailable
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
 
-        if targetApplication == nil {
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                restore(pasteboard, previous: previous)
-            }
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                keyDown.post(tap: .cghidEventTap)
-                keyUp.post(tap: .cghidEventTap)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                restore(pasteboard, previous: previous)
-            }
+        defer { restore(pasteboard, previous: previous, changeCount: changeCount) }
+        if let targetApplication {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            guard targetApplication.isActive else { throw TextInjectorError.targetApplicationUnavailable }
         }
+        try Task.checkCancellation()
+        guard pasteboard.changeCount == changeCount else { throw TextInjectorError.clipboardUnavailable }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        try await Task.sleep(nanoseconds: 600_000_000)
+
     }
 
     private static func targetApplication(for bundleIdentifier: String?) -> NSRunningApplication? {
@@ -59,11 +65,10 @@ enum TextInjector {
         return applications.first(where: \.isActive) ?? applications.first
     }
 
-    private static func restore(_ pasteboard: NSPasteboard, previous: String?) {
+    static func restore(_ pasteboard: NSPasteboard, previous: [NSPasteboardItem], changeCount: Int) {
+        guard pasteboard.changeCount == changeCount else { return }
         pasteboard.clearContents()
-        if let previous {
-            pasteboard.setString(previous, forType: .string)
-        }
+        if !previous.isEmpty { pasteboard.writeObjects(previous) }
     }
 }
 

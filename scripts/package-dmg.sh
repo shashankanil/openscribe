@@ -10,9 +10,11 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     print -u2 "No stable code-signing identity found. Set CODESIGN_IDENTITY or install a signing certificate."
     exit 1
 fi
-APP="$ROOT/dist/OpenScribe.app"
+CONFIG="${CONFIGURATION:-debug}"
+OUTPUT_DIR="${PACKAGE_OUTPUT_DIR:-$ROOT/dist}"
+APP="$OUTPUT_DIR/OpenScribe.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppInfo.plist")"
-DMG="$ROOT/dist/OpenScribe-v${VERSION}-macos-arm64.dmg"
+DMG="$OUTPUT_DIR/OpenScribe-v${VERSION}-macos-arm64.dmg"
 STAGING="$(mktemp -d)"
 
 cleanup() {
@@ -20,8 +22,8 @@ cleanup() {
 }
 trap cleanup EXIT
 CODESIGN_IDENTITY="$SIGNING_IDENTITY" "$ROOT/scripts/package-app.sh" >/dev/null
-BIN_PATH="$(swift build --show-bin-path --package-path "$ROOT")"
-INSTALLER="$ROOT/dist/OpenScribe Installer.app"
+BIN_PATH="$(swift build --show-bin-path -c "$CONFIG" --package-path "$ROOT")"
+INSTALLER="$OUTPUT_DIR/OpenScribe Installer.app"
 rm -rf "$INSTALLER"
 mkdir -p "$INSTALLER/Contents/MacOS"
 cp "$BIN_PATH/OpenScribeInstaller" "$INSTALLER/Contents/MacOS/OpenScribeInstaller"

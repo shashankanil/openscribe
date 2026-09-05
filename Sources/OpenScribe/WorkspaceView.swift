@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct WorkspaceView: View {
     @ObservedObject var controller: AppController
@@ -26,6 +27,17 @@ struct WorkspaceView: View {
     }
 
     var body: some View {
+        Group {
+            if let editingNote {
+                NoteDetailView(note: editingNote, controller: controller) { self.editingNote = nil }
+                    .id(editingNote.id)
+            } else {
+                feed
+            }
+        }
+    }
+
+    private var feed: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             feedControls
@@ -74,10 +86,6 @@ struct WorkspaceView: View {
         }
         .background(FlowTheme.paper)
         .tint(FlowTheme.lavenderDeep)
-        .sheet(item: $editingNote) { note in
-            NoteDetailView(note: note, controller: controller)
-                .frame(minWidth: 720, minHeight: 560)
-        }
         .onChange(of: search) { _, _ in displayLimit = pageSize }
         .onChange(of: filter) { _, _ in displayLimit = pageSize }
     }
@@ -88,9 +96,7 @@ struct WorkspaceView: View {
                 Text("Notes")
                     .flowDisplayFont(size: 30)
                     .foregroundStyle(FlowTheme.ink)
-                Text("A plain-text timeline of everything you said.")
-                    .flowUIFont(size: 12)
-                    .foregroundStyle(FlowTheme.inkMuted)
+
             }
             Spacer()
             Text("\(visibleNotes.count) \(visibleNotes.count == 1 ? "note" : "notes")")
@@ -205,6 +211,11 @@ private struct PlainNoteRow: View {
                 }
                 .buttonStyle(.plain)
                 .help(note.isPinned ? "Unpin note" : "Pin note")
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(note.displayText, forType: .string)
+                } label: { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.plain).help("Copy note")
                 Button(action: onEdit) {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 10, weight: .medium))
@@ -217,11 +228,12 @@ private struct PlainNoteRow: View {
             Text(note.displayText.isEmpty ? "Empty note" : note.displayText)
                 .flowUIFont(size: 16)
                 .foregroundStyle(FlowTheme.ink)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+                .lineLimit(3)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onEdit)
 
             HStack(spacing: 8) {
-                Text(note.relativeDate)
+                Text(note.duration > 0 ? "Dictation" : "Note")
                 if note.duration > 0 {
                     Text("·")
                     Text(formattedDuration(note.duration))
@@ -241,13 +253,20 @@ private struct PlainNoteRow: View {
 }
 
 private struct NoteDetailView: View {
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
     @ObservedObject var controller: AppController
     @State private var note: VoiceNote
     @State private var showRaw = false
     @State private var saved = false
+    @State private var showCorrection = false
+    @State private var correctionHeard = ""
+    @State private var correctionReplacement = ""
+    @State private var exportError: String?
+    @State private var deleted = false
+    @State private var showDelete = false
 
-    init(note: VoiceNote, controller: AppController) {
+    init(note: VoiceNote, controller: AppController, onClose: @escaping () -> Void) {
+        self.onClose = onClose
         self.controller = controller
         _note = State(initialValue: note)
     }
@@ -256,13 +275,44 @@ private struct NoteDetailView: View {
         Binding(
             get: { showRaw ? note.rawText : (note.cleanedText.isEmpty ? note.rawText : note.cleanedText) },
             set: { value in
-                if showRaw { note.rawText = value } else { note.cleanedText = value }
+                if !showRaw { note.cleanedText = value }
             }
         )
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button { onClose() } label: {
+                    Label("All notes", systemImage: "chevron.left")
+                }.buttonStyle(FlowQuietButtonStyle())
+                Spacer()
+                Button("Remember correction") { showCorrection.toggle() }.buttonStyle(FlowQuietButtonStyle())
+                Button("Export…", action: exportNote).buttonStyle(FlowQuietButtonStyle())
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(showRaw ? note.rawText : note.displayText, forType: .string)
+                } label: { Label("Copy text", systemImage: "doc.on.doc") }
+                    .buttonStyle(FlowQuietButtonStyle())
+            }.padding(.horizontal, 32).padding(.top, 20)
+
+            if showCorrection {
+                HStack {
+                    TextField("Mistaken phrase", text: $correctionHeard)
+                    Image(systemName: "arrow.right")
+                    TextField("Correct spelling", text: $correctionReplacement)
+                    Button("Remember") {
+                        let heard = correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let replacement = correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines)
+                        controller.updateSettings {
+                            $0.correctionRules.removeAll { $0.heard.caseInsensitiveCompare(heard) == .orderedSame }
+                            $0.correctionRules.append(CorrectionRule(heard: heard, replacement: replacement))
+                        }
+                        showCorrection = false; correctionHeard = ""; correctionReplacement = ""
+                    }.disabled(correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Cancel") { showCorrection = false }
+                }.textFieldStyle(.roundedBorder).padding(24)
+            }
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("NOTE")
@@ -319,6 +369,7 @@ private struct NoteDetailView: View {
             .padding(.bottom, 16)
 
             TextEditor(text: bodyText)
+                .disabled(showRaw)
                 .flowUIFont(size: 16)
                 .foregroundStyle(FlowTheme.ink)
                 .scrollContentBackground(.hidden)
@@ -330,13 +381,12 @@ private struct NoteDetailView: View {
                 .padding(.bottom, 25)
 
             HStack {
-                Text("Edits save locally. The original transcript stays attached to this note.")
+                Text("Original is read-only. Edits save when you leave.")
                     .flowUIFont(size: 10)
                     .foregroundStyle(FlowTheme.inkMuted)
                 Spacer()
                 Button("Delete note", role: .destructive) {
-                    controller.deleteNote(note)
-                    dismiss()
+                    showDelete = true
                 }
                 .buttonStyle(FlowQuietButtonStyle())
             }
@@ -344,7 +394,23 @@ private struct NoteDetailView: View {
             .padding(.bottom, 18)
         }
         .background(FlowTheme.paper)
-        .onDisappear { controller.updateNote(note) }
+        .onDisappear { if !deleted { controller.updateNote(note) } }
+        .alert("Delete this note?", isPresented: $showDelete) {
+            Button("Delete", role: .destructive) { deleted = true; controller.deleteNote(note); onClose() }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Export failed", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK") { exportError = nil }
+        } message: { Text(exportError ?? "") }
+    }
+
+    private func exportNote() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = String(note.title.prefix(80)).replacingOccurrences(of: "/", with: "-") + ".txt"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try (showRaw ? note.rawText : note.displayText).write(to: url, atomically: true, encoding: .utf8) }
+        catch { exportError = error.localizedDescription }
     }
 
     private func formattedDuration(_ duration: TimeInterval) -> String {

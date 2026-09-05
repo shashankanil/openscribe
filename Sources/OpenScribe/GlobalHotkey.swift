@@ -7,7 +7,6 @@ final class GlobalHotkey: ObservableObject {
     private var localKeyDownMonitor: Any?
     private var globalReleaseMonitor: Any?
     private var localReleaseMonitor: Any?
-    private var lastTrigger = Date.distantPast
     private var onPress: (() -> Void)?
     private var onRelease: (() -> Void)?
     private var keyCode: UInt16 = 49
@@ -35,7 +34,7 @@ final class GlobalHotkey: ObservableObject {
             return event
         }
 
-        if onRelease != nil || keyCode == 63 {
+        do {
             let releaseHandler: (NSEvent) -> Void = { [weak self] event in
                 self?.handleRelease(event)
             }
@@ -66,25 +65,23 @@ final class GlobalHotkey: ObservableObject {
             .forEach { NSEvent.removeMonitor($0) }
     }
 
-    private func handleKeyDown(_ event: NSEvent) {
+    func handleKeyDown(_ event: NSEvent) {
         guard event.type == .keyDown, event.keyCode == keyCode, keyCode != 63 else { return }
         let flags = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
         guard flags.contains(requiredModifiers), !requiredModifiers.isEmpty else { return }
         guard !event.isARepeat, !isShortcutDown else { return }
-        guard Date().timeIntervalSince(lastTrigger) > 0.25 else { return }
-        lastTrigger = Date()
         isShortcutDown = true
         onPress?()
     }
 
-    private func handleRelease(_ event: NSEvent) {
+    func handleRelease(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
 
         if keyCode == 63, event.type == .flagsChanged {
+            // Other modifier keys also emit flagsChanged. They must not split a Globe recording.
+            guard event.keyCode == 63 else { return }
             let functionIsDown = flags.contains(.function)
             if functionIsDown && !isShortcutDown {
-                guard Date().timeIntervalSince(lastTrigger) > 0.25 else { return }
-                lastTrigger = Date()
                 isShortcutDown = true
                 onPress?()
             } else if !functionIsDown && isShortcutDown {

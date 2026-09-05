@@ -49,6 +49,8 @@ final class AppStore: ObservableObject {
 
     @discardableResult
     func addNote(
+        id: UUID = UUID(),
+        createdAt: Date = Date(),
         rawText: String,
         cleanedText: String,
         duration: TimeInterval,
@@ -58,7 +60,10 @@ final class AppStore: ObservableObject {
     ) -> VoiceNote {
         let text = cleanedText.isEmpty ? rawText : cleanedText
         let title = Self.makeTitle(from: text)
-        let note = VoiceNote(
+        let existing = notes.first { $0.id == id }
+        var note = VoiceNote(
+            id: id,
+            createdAt: existing?.createdAt ?? createdAt,
             title: title,
             rawText: rawText,
             cleanedText: cleanedText,
@@ -67,7 +72,10 @@ final class AppStore: ObservableObject {
             sourceApplication: sourceApplication,
             sourceBundleIdentifier: sourceBundleIdentifier
         )
-        notes.insert(note, at: 0)
+        note.isPinned = existing?.isPinned ?? false
+        note.tags = existing?.tags ?? []
+        if let index = notes.firstIndex(where: { $0.id == id }) { notes[index] = note }
+        else { notes.insert(note, at: 0) }
         return note
     }
 
@@ -99,6 +107,10 @@ final class AppStore: ObservableObject {
 
     func clearNotes() {
         notes.removeAll()
+    }
+
+    func hasPersistedNote(_ id: UUID) -> Bool {
+        Self.read([VoiceNote].self, from: notesURL)?.contains { $0.id == id } ?? false
     }
 
     func flush() {

@@ -26,6 +26,9 @@ final class AudioChunkStoreTests: XCTestCase {
         store.append(buffer)
         let result = store.finish()
 
+        store.cancel()
+        // Finishing transfers file ownership to the processing task.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
         XCTAssertFalse(result.hadWriteError)
         XCTAssertEqual(result.chunkURLs.count, 3)
         for url in result.chunkURLs {

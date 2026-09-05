@@ -26,6 +26,9 @@ final class AudioChunkStore: @unchecked Sendable {
     private var chunkFrameLimit: AVAudioFramePosition = 1
     private var currentFile: AVAudioFile?
     private var currentURL: URL?
+    private var sampleRate: Double = 1
+    private var currentStart: TimeInterval = 0
+    private var nextStart: TimeInterval = 0
     private var currentFrameCount: AVAudioFramePosition = 0
     private var nextChunkIndex = 0
     private var chunkURLs: [URL] = []
@@ -33,7 +36,9 @@ final class AudioChunkStore: @unchecked Sendable {
     private var hadWriteError = false
     private var lastMeterDelivery = Date.distantPast
 
+    var liveSink: LiveAudioSink?
     var onLevel: ((Float) -> Void)?
+    var onError: ((Error) -> Void)?
 
     init(chunkDuration: TimeInterval = 15) {
         self.chunkDuration = max(1, chunkDuration)
@@ -49,6 +54,9 @@ final class AudioChunkStore: @unchecked Sendable {
         )
         self.directoryURL = directoryURL
         formatSettings = format.settings
+        formatSettings[AVLinearPCMIsNonInterleaved] = false
+        sampleRate = format.sampleRate
+        nextStart = 0
         chunkFrameLimit = AVAudioFramePosition(max(1, Int64(format.sampleRate * chunkDuration)))
         currentFile = nil
         currentURL = nil
@@ -60,25 +68,33 @@ final class AudioChunkStore: @unchecked Sendable {
         lastMeterDelivery = .distantPast
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) {
+    func append(_ buffer: AVAudioPCMBuffer, at timestamp: TimeInterval? = nil) {
         lock.lock()
         defer { lock.unlock() }
 
         guard isActive else { return }
+        if let timestamp {
+            if currentFile != nil, abs(timestamp - (currentStart + Double(currentFrameCount) / sampleRate)) > 0.25 {
+                closeCurrentChunkLocked()
+            }
+            if currentFile == nil { nextStart = max(0, timestamp) }
+        }
         if currentFile == nil {
             do {
                 try openNextChunkLocked()
             } catch {
                 hadWriteError = true
                 isActive = false
+                onError?(error)
                 NSLog("OpenScribe audio chunk creation error: %@", error.localizedDescription)
                 return
             }
         }
 
-        guard let currentFile else { return }
+        guard currentFile != nil else { return }
         do {
-            try currentFile.write(from: buffer)
+            try currentFile?.write(from: buffer)
+            if let currentURL { liveSink?.append(buffer, url: currentURL) }
             currentFrameCount += AVAudioFramePosition(buffer.frameLength)
             if currentFrameCount >= chunkFrameLimit {
                 closeCurrentChunkLocked()
@@ -86,6 +102,7 @@ final class AudioChunkStore: @unchecked Sendable {
         } catch {
             hadWriteError = true
             isActive = false
+            onError?(error)
             NSLog("OpenScribe audio write error: %@", error.localizedDescription)
         }
     }
@@ -96,11 +113,13 @@ final class AudioChunkStore: @unchecked Sendable {
 
         isActive = false
         closeCurrentChunkLocked()
-        return AudioCaptureFiles(
+        let result = AudioCaptureFiles(
             chunkURLs: chunkURLs,
             directoryURL: directoryURL ?? FileManager.default.temporaryDirectory,
             hadWriteError: hadWriteError
         )
+        resetLocked()
+        return result
     }
 
     func cancel() {
@@ -132,14 +151,26 @@ final class AudioChunkStore: @unchecked Sendable {
         let url = directoryURL.appendingPathComponent(filename)
         currentFile = try AVAudioFile(forWriting: url, settings: formatSettings)
         currentURL = url
+        currentStart = nextStart
+        let descriptor = AudioChunkDescriptor(filename: filename, start: currentStart, duration: 0)
+        try JSONEncoder().encode(descriptor).write(to: url.appendingPathExtension("json"), options: .atomic)
         currentFrameCount = 0
         nextChunkIndex += 1
     }
 
     private func closeCurrentChunkLocked() {
+        // Close the WAV before publishing nonzero duration as its completion marker.
+        currentFile = nil
         if let currentURL {
             if currentFrameCount > 0 {
+                liveSink?.close(currentURL)
                 chunkURLs.append(currentURL)
+                let descriptor = AudioChunkDescriptor(filename: currentURL.lastPathComponent, start: currentStart,
+                                                       duration: Double(currentFrameCount) / sampleRate)
+                do {
+                    try JSONEncoder().encode(descriptor).write(to: currentURL.appendingPathExtension("json"), options: .atomic)
+                } catch { hadWriteError = true; onError?(error) }
+                nextStart = currentStart + descriptor.duration
             } else {
                 try? FileManager.default.removeItem(at: currentURL)
             }
