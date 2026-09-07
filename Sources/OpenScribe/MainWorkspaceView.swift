@@ -53,69 +53,30 @@ struct MainWorkspaceView: View {
                 }.padding(.horizontal, 10).padding(.top, 12)
 
                 VStack(alignment: .leading, spacing: 5) {
+                    Text("LIBRARY").font(.system(size: 10, weight: .semibold)).tracking(1.2)
+                        .foregroundStyle(FlowTheme.inkMuted).padding(.horizontal, 12).padding(.bottom, 8)
                     destination(.notes)
-                    if !controller.setupReadiness.canDictate {
-                        Button("Finish setup") { controller.showOnboarding() }.buttonStyle(.plain).padding(12)
-                    }
                     destination(.meetings)
                     destination(.calendar)
-                    destination(.personalize)
-                    Button { controller.workspaceSection = .general } label: {
-                        Label("Settings", systemImage: "gearshape")
-                            .flowUIFont(size: 12, weight: .medium)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12).padding(.vertical, 10)
-                            .background(isSettingsArea ? FlowTheme.lavender.opacity(0.6) : .clear, in: RoundedRectangle(cornerRadius: 9))
-                    }.buttonStyle(.plain)
-                    if isSettingsArea {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach([WorkspaceSection.general, .speech, .cleanup, .privacy, .permissions]) { section in
-                                Button { controller.workspaceSection = section } label: {
-                                    Text(section.title).font(.system(size: 12, weight: controller.workspaceSection == section ? .semibold : .regular))
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.vertical, 8).padding(.horizontal, 12)
-                                        .background(controller.workspaceSection == section ? FlowTheme.lavender.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 7))
-                                }.buttonStyle(.plain)
-                            }
-                        }.padding(.leading, 20)
-                    }
-
                 }
                 Spacer()
-                if controller.hasFailedRecording {
-                    Button { controller.workspaceSection = .notes } label: {
-                        Label("Recover recording", systemImage: "arrow.clockwise")
-                            .font(.system(size: 11, weight: .medium))
-                    }.buttonStyle(.plain).padding(.horizontal, 12)
-                }
-                VStack(alignment: .leading, spacing: 9) {
-                    Button {
-                        if controller.capturePhase == .recording { controller.finishCapture() }
-                        else { controller.startCapture() }
-                    } label: {
-                        Label(controller.capturePhase == .recording ? "Stop & save" : "Record a note", systemImage: controller.capturePhase == .recording ? "stop.fill" : "mic.fill")
-                    }.buttonStyle(.borderedProminent)
-                        .disabled(controller.isDictationBusy && controller.capturePhase != .recording)
-                    Button("Setup guide") { controller.showOnboarding() }.buttonStyle(.link).font(.caption)
-                        .disabled(controller.isDictationBusy)
-                    HStack(spacing: 7) {
-                        Circle().fill(controller.capturePhase == .recording ? FlowTheme.coral : FlowTheme.lavenderDeep)
-                            .frame(width: 6, height: 6)
-                        Text(!controller.isDictationBusy && !controller.setupReadiness.canDictate ? "Setup needed" : controller.capturePhase.label).flowUIFont(size: 11, weight: .medium)
-                    }
-                    Text(controller.permissions.accessibilityTrusted ? controller.settings.shortcutDisplay + " to dictate" : "Use Record a note to begin")
-                        .flowUIFont(size: 11).foregroundStyle(FlowTheme.inkMuted)
+                Button { controller.workspaceSection = .general } label: {
+                    Label("Settings", systemImage: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                        .background(isSettingsArea ? FlowTheme.lavender.opacity(0.5) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                }.buttonStyle(.plain).accessibilityValue(isSettingsArea ? "Selected" : "")
+                Divider()
+                captureControl
 
-                }.padding(12)
             }
             .padding(14)
-            .frame(width: 220)
+            .frame(width: 212)
             .background(FlowTheme.paperMuted)
             Divider().overlay(FlowTheme.line)
             VStack(spacing: 0) {
-
-
-                if let title = controller.calendar.trackedTitle {
+                if isSettingsArea { settingsNavigation }
+                if let title = controller.calendar.trackedTitle, !controller.meetings.occupiesCapture {
                     HStack {
                         Label(title, systemImage: "calendar").lineLimit(1)
                         Spacer()
@@ -123,12 +84,19 @@ struct MainWorkspaceView: View {
                         Button("Extend 15 min") { controller.calendar.extend() }
                     }.font(.caption).padding(12).background(FlowTheme.lavender.opacity(0.3))
                 }
-                if controller.meetings.occupiesCapture {
+                if controller.meetings.occupiesCapture && (controller.workspaceSection != .meetings || controller.calendar.trackedTitle != nil) {
                     HStack {
-                        Label(controller.meetings.isPaused ? "Meeting paused" : "Meeting recording active", systemImage: "record.circle")
+                        Label(controller.calendar.trackedTitle ?? (controller.meetings.isPaused ? "Meeting paused" : "Meeting recording active"), systemImage: "record.circle").lineLimit(1)
                         Spacer()
-                        Button("Open meeting") { controller.workspaceSection = .meetings }
-                        Button("Stop & save") { controller.meetings.finish() }.disabled(controller.meetings.isBusy)
+                        if controller.workspaceSection != .meetings {
+                            Button("Open meeting") { controller.workspaceSection = .meetings }
+                        }
+                        if controller.calendar.trackedTitle != nil {
+                            Button("Extend 15 min") { controller.calendar.extend() }
+                        }
+                        if controller.workspaceSection != .meetings {
+                            Button("Stop & save") { controller.meetings.finish() }.disabled(controller.meetings.isBusy)
+                        }
                     }.flowUIFont(size: 11).padding(14).background(FlowTheme.coral.opacity(0.2))
                 }
                 if controller.hasFailedRecording && controller.workspaceSection == .notes {
@@ -169,7 +137,60 @@ struct MainWorkspaceView: View {
         }
     }
 
-    private var isSettingsArea: Bool { isSettings && controller.workspaceSection != .personalize && controller.workspaceSection != .calendar || controller.workspaceSection == .permissions }
+    private var isSettingsArea: Bool {
+        ![WorkspaceSection.notes, .meetings, .calendar].contains(controller.workspaceSection)
+    }
+
+    private var settingsNavigation: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Settings").flowDisplayFont(size: 30)
+                Spacer()
+                Button("Setup guide") { controller.showOnboarding() }
+                    .buttonStyle(FlowQuietButtonStyle()).disabled(controller.isDictationBusy)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach([WorkspaceSection.general, .speech, .cleanup, .personalize, .privacy, .permissions]) { section in
+                        Button { controller.workspaceSection = section } label: {
+                            Text(section == .cleanup ? "Writing" : section == .privacy ? "Privacy" : section.title).font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 12).padding(.vertical, 9)
+                                .background(controller.workspaceSection == section ? FlowTheme.lavender.opacity(0.6) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                        }.buttonStyle(.plain)
+                            .accessibilityValue(controller.workspaceSection == section ? "Selected" : "")
+                    }
+                }
+            }
+        }.padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 16)
+            .background(FlowTheme.paper)
+    }
+
+    private var captureControl: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !controller.setupReadiness.canDictate && !controller.isDictationBusy {
+                Text("Ready when you are").font(.system(size: 12, weight: .semibold))
+                Text("Connect your provider and check permissions.").font(.caption).foregroundStyle(FlowTheme.inkMuted)
+                Button("Finish setup") { controller.showOnboarding() }.buttonStyle(.borderedProminent)
+            } else {
+                HStack(spacing: 7) {
+                    Circle().fill(controller.capturePhase == .recording ? FlowTheme.coral : FlowTheme.lavenderDeep).frame(width: 6, height: 6)
+                    Text(controller.isDictationBusy ? controller.capturePhase.label : "Dictation").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                }
+                Button {
+                    if controller.capturePhase == .recording { controller.finishCapture() }
+                    else { controller.startCapture() }
+                } label: {
+                    Label(controller.capturePhase == .recording ? "Stop & save" : "Record a note", systemImage: controller.capturePhase == .recording ? "stop.fill" : "mic.fill")
+                        .frame(maxWidth: .infinity)
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(controller.meetings.occupiesCapture || (controller.isDictationBusy && controller.capturePhase != .recording))
+                Text(controller.meetings.occupiesCapture ? "Available after your meeting" : controller.permissions.accessibilityTrusted ? controller.settings.shortcutDisplay + " to dictate anywhere" : "Records directly to Notes")
+                    .font(.system(size: 10)).foregroundStyle(FlowTheme.inkMuted)
+            }
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(FlowTheme.paper, in: RoundedRectangle(cornerRadius: 12))
+    }
 
     private var isSettings: Bool { controller.workspaceSection != .notes && controller.workspaceSection != .meetings && controller.workspaceSection != .permissions }
 

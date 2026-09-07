@@ -78,7 +78,7 @@ struct WorkspaceView: View {
                             .padding(.vertical, 24)
                         }
                     }
-                    .padding(.horizontal, 42)
+                    .padding(.horizontal, 32)
                     .padding(.vertical, 10)
                 }
                 .frame(maxHeight: .infinity)
@@ -107,17 +107,12 @@ struct WorkspaceView: View {
                 let note = controller.addManualNote()
                 editingNote = note
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(FlowTheme.ink)
-                    .frame(width: 30, height: 30)
-                    .background(FlowTheme.lavender, in: Circle())
-                    .overlay(Circle().stroke(FlowTheme.ink, lineWidth: 1))
+                Label("New note", systemImage: "square.and.pencil")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlowQuietButtonStyle())
             .help("New note")
         }
-        .padding(.horizontal, 42)
+        .padding(.horizontal, 32)
         .padding(.top, 30)
         .padding(.bottom, 22)
     }
@@ -149,7 +144,7 @@ struct WorkspaceView: View {
 
             Spacer()
         }
-        .padding(.horizontal, 42)
+        .padding(.horizontal, 32)
         .padding(.bottom, 16)
     }
 
@@ -166,7 +161,7 @@ struct WorkspaceView: View {
                 .foregroundStyle(FlowTheme.inkMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(42)
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
@@ -345,7 +340,7 @@ private struct NoteDetailView: View {
                 }
                 .buttonStyle(FlowPrimaryButtonStyle())
             }
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.top, 35)
             .padding(.bottom, 24)
 
@@ -365,7 +360,7 @@ private struct NoteDetailView: View {
             }
             .flowUIFont(size: 11, weight: .medium)
             .foregroundStyle(FlowTheme.inkMuted)
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.bottom, 16)
 
             TextEditor(text: bodyText)
@@ -390,7 +385,7 @@ private struct NoteDetailView: View {
                 }
                 .buttonStyle(FlowQuietButtonStyle())
             }
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.bottom, 18)
         }
         .background(FlowTheme.paper)
