@@ -15,6 +15,7 @@ final class AppController: ObservableObject {
     let calendar = CalendarMeetingController()
     private var calendarSubscription: AnyCancellable?
     private var meetingSubscription: AnyCancellable?
+    private var noticeSubscriptions = Set<AnyCancellable>()
     let permissions: PermissionCenter
 
     @Published private(set) var capturePhase: CapturePhase = .idle
@@ -22,6 +23,10 @@ final class AppController: ObservableObject {
     @Published private(set) var currentTranscript = ""
     @Published private(set) var lastError: String?
 
+    @Published var onboardingVisible = false
+    @Published var noticeDetailsVisible = false
+    private var noticePanel: NoticePanel?
+    private let setupCompletedKey = "setup-completed-v3"
     @Published var workspaceSection: WorkspaceSection = .notes
     private var overlayPanel: OverlayPanel?
     private var workspaceWindow: NSWindow?
@@ -53,6 +58,12 @@ final class AppController: ObservableObject {
         }
         meetingSubscription = meetings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         calendarSubscription = calendar.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
         if let error = recovery.error { lastError = error }
         do { try CredentialStore.migrateLegacy(settings: store.settings) }
@@ -85,11 +96,12 @@ final class AppController: ObservableObject {
         applyTheme(settings.theme)
         permissions.refresh()
         NSLog("OpenScribe booted")
-        if !permissions.hasSeenOnboarding {
-            showPermissions()
-        } else {
-            startHotkeyIfAllowed()
+        let completed = UserDefaults.standard.bool(forKey: setupCompletedKey)
+            || (permissions.hasSeenOnboarding && setupReadiness.canDictate)
+        if setupReadiness.shouldPresent(completed: completed, explicitlyRequested: CommandLine.arguments.contains("--onboarding")) {
+            showOnboarding()
         }
+        startHotkeyIfAllowed()
         if store.settings.showOverlayWhenIdle {
             captureHint = idleHint
             showOverlay()
@@ -134,6 +146,10 @@ final class AppController: ObservableObject {
         captureGeneration = generation
         holdToTalkReleasePending = false
         permissions.refresh()
+        guard !credential(for: .speech).isEmpty else {
+            showOnboarding()
+            return
+        }
         guard permissions.microphoneReady else {
             capturePhase = .idle
             captureHint = "Allow microphone access to dictate"
@@ -145,6 +161,8 @@ final class AppController: ObservableObject {
         recordingSourceBundleIdentifier = activeApplication.bundleIdentifier
 
         lastError = nil
+        currentTranscript = ""
+        noticePanel?.orderOut(nil)
         transientErrorTask?.cancel()
         transientErrorTask = nil
         captureHint = "Starting…"
@@ -153,7 +171,9 @@ final class AppController: ObservableObject {
             guard let self else { return }
             defer { if captureGeneration == generation { startTask = nil } }
             do {
-                let job = DictationJob(settings: settings, sourceApplication: recordingSourceApplication,
+                var captureSettings = settings
+                if onboardingVisible { captureSettings.pasteIntoFocusedApp = false }
+                let job = DictationJob(settings: captureSettings, sourceApplication: recordingSourceApplication,
                                        sourceBundleIdentifier: recordingSourceBundleIdentifier)
                 try recovery.save(job)
                 activeRecoveryJob = job
@@ -257,7 +277,13 @@ final class AppController: ObservableObject {
             recordingSourceApplication = nil
             recordingSourceBundleIdentifier = nil
             activeRecoveryJob = nil
-            hasFailedRecording = !recovery.jobs.isEmpty
+            Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
+        hasFailedRecording = !recovery.jobs.isEmpty
             fail(with: error)
         }
     }
@@ -277,6 +303,12 @@ final class AppController: ObservableObject {
         recorder.cancel()
         if let job = activeRecoveryJob { try? recovery.remove(job.id) }
         activeRecoveryJob = nil
+        Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
         holdToTalkReleasePending = false
         recordingSourceApplication = nil
@@ -294,7 +326,13 @@ final class AppController: ObservableObject {
             // Stable note IDs make recovery safe even if the process died after saving the note.
             if store.hasPersistedNote(job.id) {
                 try recovery.remove(job.id)
-                hasFailedRecording = !recovery.jobs.isEmpty
+                Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
+        hasFailedRecording = !recovery.jobs.isEmpty
                 return
             }
             let recording = try recovery.recording(job.id)
@@ -312,6 +350,12 @@ final class AppController: ObservableObject {
     func discardFailedRecording() {
         guard !isDictationBusy, let job = recovery.jobs.first else { return }
         do { try recovery.remove(job.id) } catch { showTransientError(error.localizedDescription) }
+        Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
     }
 
@@ -356,6 +400,26 @@ final class AppController: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         workspaceWindow?.makeKeyAndOrderFront(nil)
     }
+    var setupReadiness: SetupReadiness {
+        SetupReadiness(microphone: permissions.microphoneReady, accessibility: permissions.accessibilityTrusted,
+                       speechKey: !credential(for: .speech).isEmpty, pasteEnabled: settings.pasteIntoFocusedApp)
+    }
+
+    func showOnboarding() {
+        onboardingVisible = true
+        openMainWindow()
+    }
+
+    func finishOnboarding() {
+        permissions.refresh()
+        guard setupReadiness.canDictate else { return }
+        UserDefaults.standard.set(true, forKey: setupCompletedKey)
+        permissions.markOnboardingSeen()
+        onboardingVisible = false
+        startHotkeyIfAllowed()
+        workspaceSection = .notes
+    }
+
     func showPermissions() {
         workspaceSection = .permissions
         openMainWindow()
@@ -377,6 +441,8 @@ final class AppController: ObservableObject {
 
     func refreshPermissions() {
         permissions.refresh()
+        startHotkeyIfAllowed()
+        objectWillChange.send()
     }
 
     func requestMicrophonePermission() async {
@@ -549,7 +615,13 @@ final class AppController: ObservableObject {
             defer {
                 streaming?.cancel()
                 if job == nil { recording.cleanup() }
-                hasFailedRecording = !recovery.jobs.isEmpty
+                Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
+        hasFailedRecording = !recovery.jobs.isEmpty
                 if captureGeneration == generation { self.processingTask = nil }
             }
             do {
@@ -635,7 +707,7 @@ final class AppController: ObservableObject {
                     showTransientError("Transcript saved; cleanup unavailable: \(cleanupFailure.localizedDescription)")
                 }
 
-                if speechSettings.pasteIntoFocusedApp && pasteResult {
+                if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible {
                     do {
                         try await TextInjector.paste(note.displayText, into: sourceBundleIdentifier)
                     } catch {
@@ -664,7 +736,13 @@ final class AppController: ObservableObject {
                 return
             } catch {
                 guard captureGeneration == generation, !Task.isCancelled else { return }
-                hasFailedRecording = !recovery.jobs.isEmpty
+                Publishers.Merge(meetings.$error, calendar.$error)
+            .removeDuplicates()
+            .sink { [weak self] message in
+                guard let message, !message.isEmpty else { return }
+                self?.showTransientError(message)
+            }.store(in: &noticeSubscriptions)
+        hasFailedRecording = !recovery.jobs.isEmpty
                 NSLog("OpenScribe processing failed: %@", error.localizedDescription)
                 fail(with: error)
             }
@@ -683,30 +761,28 @@ final class AppController: ObservableObject {
         }
 
         NSLog("OpenScribe capture failed: %@", error.localizedDescription)
+        capturePhase = .idle
+        captureHint = idleHint
+        if !settings.showOverlayWhenIdle { hideOverlay() }
         showTransientError(error.localizedDescription)
     }
 
     private func showTransientError(_ message: String) {
         transientErrorTask?.cancel()
         lastError = message.isEmpty ? "Something went wrong." : message
-        capturePhase = .failed
-        captureHint = lastError ?? "Something went wrong."
-        recorder.cancel()
-        showOverlay()
-
+        if noticePanel == nil { noticePanel = NoticePanel(controller: self) }
+        noticePanel?.show()
         transientErrorTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 4_000_000_000)
-            } catch {
-                return
-            }
-            guard let self, self.capturePhase == .failed else { return }
-            self.lastError = nil
-            self.capturePhase = .idle
-            self.captureHint = self.idleHint
-            self.transientErrorTask = nil
-            if !self.settings.showOverlayWhenIdle { self.hideOverlay() }
+            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
+            self?.noticePanel?.orderOut(nil)
+            self?.transientErrorTask = nil
         }
+    }
+
+    func inspectNotice() {
+        noticePanel?.orderOut(nil)
+        openMainWindow()
+        noticeDetailsVisible = true
     }
 
     private func showOverlay() {

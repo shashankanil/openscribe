@@ -35,6 +35,16 @@ struct MainWorkspaceView: View {
     @ObservedObject var controller: AppController
 
     var body: some View {
+        Group {
+            if controller.onboardingVisible { OnboardingView(controller: controller) }
+            else { workspace }
+        }
+        .alert("OpenScribe needs attention", isPresented: $controller.noticeDetailsVisible) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(controller.lastError ?? "") }
+    }
+
+    private var workspace: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 10) {
@@ -44,6 +54,9 @@ struct MainWorkspaceView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     destination(.notes)
+                    if !controller.setupReadiness.canDictate {
+                        Button("Finish setup") { controller.showOnboarding() }.buttonStyle(.plain).padding(12)
+                    }
                     destination(.meetings)
                     destination(.calendar)
                     destination(.personalize)
@@ -76,6 +89,15 @@ struct MainWorkspaceView: View {
                     }.buttonStyle(.plain).padding(.horizontal, 12)
                 }
                 VStack(alignment: .leading, spacing: 9) {
+                    Button {
+                        if controller.capturePhase == .recording { controller.finishCapture() }
+                        else { controller.startCapture() }
+                    } label: {
+                        Label(controller.capturePhase == .recording ? "Stop & save" : "Record a note", systemImage: controller.capturePhase == .recording ? "stop.fill" : "mic.fill")
+                    }.buttonStyle(.borderedProminent)
+                        .disabled(controller.isDictationBusy && controller.capturePhase != .recording)
+                    Button("Setup guide") { controller.showOnboarding() }.buttonStyle(.link).font(.caption)
+                        .disabled(controller.isDictationBusy)
                     HStack(spacing: 7) {
                         Circle().fill(controller.capturePhase == .recording ? FlowTheme.coral : FlowTheme.lavenderDeep)
                             .frame(width: 6, height: 6)

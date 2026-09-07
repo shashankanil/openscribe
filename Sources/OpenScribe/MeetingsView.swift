@@ -70,7 +70,7 @@ struct MeetingsView: View {
                         }.flowCard(inset: 20)
                         }
                         if let error = meetings.error ?? meetings.store.storageError {
-                            Text(error).foregroundStyle(.red).textSelection(.enabled)
+                            DisclosureGroup(UserNotice.summary(error)) { Text(error).font(.caption).textSelection(.enabled) }.font(.caption)
                         }
                         TextField("Search meetings", text: $search).textFieldStyle(.roundedBorder)
                         ForEach(meetings.meetings.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.transcript.localizedCaseInsensitiveContains(search) }) { record in
@@ -94,7 +94,7 @@ struct MeetingsView: View {
     }
 }
 
-private struct MeetingDetailView: View {
+struct MeetingDetailView: View {
     let record: MeetingRecord
     @ObservedObject var meetings: MeetingController
     let onClose: () -> Void
@@ -102,7 +102,14 @@ private struct MeetingDetailView: View {
     @State private var playingID: String?
     @State private var showDelete = false
     @State private var editTitle = ""
-    @State private var tab = "summary"
+    @State private var tab: String
+
+    init(record: MeetingRecord, meetings: MeetingController, onClose: @escaping () -> Void) {
+        self.record = record; self.meetings = meetings; self.onClose = onClose
+        _tab = State(initialValue: record.summary == nil ? "transcript" : "summary")
+    }
+    @State private var transcriptSearch = ""
+    @State private var transcriptSource = "all"
 
     private var isActive: Bool { meetings.activeID == record.id }
     var body: some View {
@@ -152,22 +159,16 @@ private struct MeetingDetailView: View {
                 HStack {
                     Text(meetings.liveError ?? meetings.liveProgress).font(.caption).foregroundStyle(meetings.liveError == nil ? Color.secondary : .orange)
                     Spacer()
-                    Text("\(record.segments.count) sections saved").font(.caption).monospacedDigit()
+                    Text("Transcript saved automatically").font(.caption).monospacedDigit()
                     if meetings.liveError != nil { Button("Retry live") { meetings.retryLiveTranscription() } }
                 }
-            }
-            if isActive && !meetings.streamingPartials.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Live transcript").font(.caption).foregroundStyle(.secondary)
-                    ForEach(meetings.streamingPartials.keys.sorted(by: { $0.path < $1.path }), id: \.self) { url in
-                        Text(meetings.streamingPartials[url] ?? "").font(.callout).textSelection(.enabled)
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
             }
             if let notice = record.recoveryNotice { Text(notice).flowUIFont(size: 11).foregroundStyle(.orange) }
             if meetings.isBusy { HStack { ProgressView().controlSize(.small); Text(meetings.progress).flowUIFont(size: 11) } }
             if let error = meetings.error ?? record.lastError ?? meetings.store.storageError {
-                Text(error).flowUIFont(size: 11).foregroundStyle(.red).textSelection(.enabled)
+                DisclosureGroup(UserNotice.summary(error)) {
+                    Text(error).font(.caption).textSelection(.enabled)
+                }.font(.caption).foregroundStyle(.secondary)
             }
             Picker("Meeting view", selection: $tab) {
                 Text("Summary").tag("summary")
@@ -186,16 +187,45 @@ private struct MeetingDetailView: View {
                             Text("Save your recording, then transcribe and summarize to see the key points here.").foregroundStyle(FlowTheme.inkMuted)
                         }
                     } else if tab == "transcript" {
-                        Text("Timestamps mark audio chunks. Microphone and system audio are sources, not identified speakers.")
-                            .flowUIFont(size: 11).foregroundStyle(FlowTheme.inkMuted)
-                        if record.segments.isEmpty {
-                            Text(isActive && record.liveTranscription == true ? "Listening… Your first transcript section will appear here shortly." : "No transcript yet.").foregroundStyle(FlowTheme.inkMuted)
+                        HStack {
+                            TextField("Search this transcript", text: $transcriptSearch).textFieldStyle(.roundedBorder)
+                            Picker("Source", selection: $transcriptSource) {
+                                Text("All audio").tag("all")
+                                Text(record.microphoneLabel).tag("microphone")
+                                Text(record.systemLabel).tag("system")
+                            }.frame(width: 180)
                         }
-                        ForEach(record.segments) { segment in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Button("\(segment.timestamp) · \(segment.track == "microphone" ? record.microphoneLabel : record.systemLabel)") { play(segment) }
-                                Text(segment.text.isEmpty ? "No speech returned for this section." : segment.text).textSelection(.enabled)
-                            }
+                        Text("Grouped into readable passages. Source labels identify audio inputs, not individual speakers; timing is approximate.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        let passages = MeetingTranscript.passages(record.segments, track: transcriptSource == "all" ? nil : transcriptSource)
+                            .filter { transcriptSearch.isEmpty || $0.text.localizedCaseInsensitiveContains(transcriptSearch) }
+                        if passages.isEmpty {
+                            Text(!transcriptSearch.isEmpty ? "No matching passages." : isActive ? "Listening… Text appears here as it’s ready." : "No transcript yet.").foregroundStyle(.secondary)
+                        }
+                        ForEach(passages) { passage in
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text(passage.track == "microphone" ? record.microphoneLabel : record.systemLabel)
+                                        .font(.system(size: 12, weight: .semibold))
+                                    Spacer()
+                                    Menu(MeetingSegment.timestamp(passage.start)) {
+                                        ForEach(passage.segmentIDs, id: \.self) { id in
+                                            if let segment = record.segments.first(where: { $0.id == id }) {
+                                                Button("Listen at " + segment.timestamp) { play(segment) }
+                                            }
+                                        }
+                                    }.font(.caption).fixedSize()
+                                }.foregroundStyle(.secondary)
+                                Text(passage.text).font(.system(size: 15)).lineSpacing(6).textSelection(.enabled)
+                            }.padding(.vertical, 12)
+                        }
+                        if isActive && !meetings.streamingPartials.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Live transcript").font(.caption).foregroundStyle(.secondary)
+                                ForEach(meetings.streamingPartials.keys.sorted(by: { $0.path < $1.path }), id: \.self) { url in
+                                    Text(meetings.streamingPartials[url] ?? "").font(.callout).textSelection(.enabled)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
                         }
                     } else {
                         Text("Saved audio tracks").flowUIFont(size: 16, weight: .semibold)

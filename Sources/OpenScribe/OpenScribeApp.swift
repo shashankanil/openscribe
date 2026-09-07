@@ -79,7 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         reopenObserver = DistributedNotificationCenter.default().addObserver(forName: Notification.Name("OpenScribeOpenWorkspace"), object: identity, queue: .main) { _ in
-            Task { @MainActor in AppController.shared.openMainWindow() }
+            Task { @MainActor in
+                if AppController.shared.setupReadiness.canDictate { AppController.shared.openMainWindow() }
+                else { AppController.shared.showOnboarding() }
+            }
         }
         NSApp.setActivationPolicy(.accessory)
         AppController.shared.boot()
