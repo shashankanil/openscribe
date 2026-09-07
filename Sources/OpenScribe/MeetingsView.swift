@@ -147,10 +147,12 @@ struct MeetingDetailView: View {
                 }.padding(14).background(FlowTheme.coral.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
             } else {
                 HStack {
-                    Button(record.segments.isEmpty ? "Transcribe & summarize" : "Resume transcription") { meetings.process(record.id) }
-                        .buttonStyle(FlowPrimaryButtonStyle()).disabled(meetings.isBusy)
+                    if record.status != .ready || record.segments.isEmpty {
+                        Button(record.segments.isEmpty ? "Transcribe & summarize" : "Resume transcription") { meetings.process(record.id) }
+                            .buttonStyle(FlowPrimaryButtonStyle()).disabled(meetings.isBusy)
+                    }
                     if !record.segments.isEmpty {
-                        Button("Summarize again") { meetings.process(record.id, summarizeOnly: true) }.disabled(meetings.isBusy)
+                        Button(record.summary == nil ? "Create summary" : "Summarize again") { meetings.process(record.id, summarizeOnly: true) }.disabled(meetings.isBusy)
                     }
                     if meetings.isBusy { Button("Cancel processing") { meetings.cancelProcessing() } }
                 }

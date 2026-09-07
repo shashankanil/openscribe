@@ -9,8 +9,7 @@ final class MeetingStore: ObservableObject {
     let root: URL
 
     init(root: URL? = nil) {
-        self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("WhisperFlow/Meetings", isDirectory: true)
+        self.root = root ?? AppPaths.root.appendingPathComponent("Meetings")
         do {
             try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
             for directory in try FileManager.default.contentsOfDirectory(at: self.root, includingPropertiesForKeys: nil) {

@@ -101,9 +101,9 @@ struct MainWorkspaceView: View {
                     HStack(spacing: 7) {
                         Circle().fill(controller.capturePhase == .recording ? FlowTheme.coral : FlowTheme.lavenderDeep)
                             .frame(width: 6, height: 6)
-                        Text(controller.capturePhase.label).flowUIFont(size: 11, weight: .medium)
+                        Text(!controller.isDictationBusy && !controller.setupReadiness.canDictate ? "Setup needed" : controller.capturePhase.label).flowUIFont(size: 11, weight: .medium)
                     }
-                    Text(controller.settings.shortcutDisplay + " to dictate")
+                    Text(controller.permissions.accessibilityTrusted ? controller.settings.shortcutDisplay + " to dictate" : "Use Record a note to begin")
                         .flowUIFont(size: 11).foregroundStyle(FlowTheme.inkMuted)
 
                 }.padding(12)
