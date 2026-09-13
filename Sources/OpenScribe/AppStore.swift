@@ -15,9 +15,7 @@ final class AppStore: ObservableObject {
     private let notesURL: URL
 
     init(rootURL overrideRootURL: URL? = nil) {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        let appRoot = overrideRootURL ?? support.appendingPathComponent("WhisperFlow", isDirectory: true)
+        let appRoot = overrideRootURL ?? AppPaths.root
         rootURL = appRoot
         settingsURL = appRoot.appendingPathComponent("settings.json")
         notesURL = appRoot.appendingPathComponent("notes.json")

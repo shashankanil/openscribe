@@ -17,8 +17,7 @@ final class DictationRecoveryStore {
     private(set) var error: String?
 
     init(root: URL? = nil) {
-        self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("WhisperFlow/DictationRecovery")
+        self.root = root ?? AppPaths.root.appendingPathComponent("DictationRecovery")
         do {
             try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
             for directory in try FileManager.default.contentsOfDirectory(at: self.root, includingPropertiesForKeys: nil) {

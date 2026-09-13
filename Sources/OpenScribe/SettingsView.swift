@@ -45,7 +45,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 24) {
                 SettingsCard(
                     eyebrow: "GENERAL",
-                    title: "General"
+                    title: "Appearance"
                 ) {
                     Picker("Theme", selection: settingBinding(\.theme)) {
                         ForEach(FlowThemeVariant.allCases) { theme in
@@ -58,6 +58,8 @@ struct SettingsView: View {
                         .flowUIFont(size: 11)
                         .foregroundStyle(FlowTheme.inkMuted)
 
+                }
+                SettingsCard(eyebrow: "", title: "Recording & shortcut") {
                     Picker("Microphone", selection: settingBinding(\.microphoneDeviceUID)) {
                         Text("System default").tag("")
                         ForEach(microphones) { Text($0.name).tag($0.id) }
@@ -114,6 +116,10 @@ struct SettingsView: View {
                     }
                     .frame(width: 1, height: 1)
 
+                    Toggle("Paste text into the focused app", isOn: settingBinding(\.pasteIntoFocusedApp))
+                        .toggleStyle(.switch)
+                }
+                SettingsCard(eyebrow: "", title: "Recording feedback") {
                     Picker("Flowbar position", selection: settingBinding(\.overlayPosition)) {
                         Text("Bottom center").tag("bottom-center")
                         Text("Bottom left").tag("bottom-left")
@@ -127,8 +133,6 @@ struct SettingsView: View {
                     Toggle("Show Flowbar when idle", isOn: settingBinding(\.showOverlayWhenIdle))
                         .toggleStyle(.switch)
 
-                    Toggle("Paste polished text into focused app", isOn: settingBinding(\.pasteIntoFocusedApp))
-                        .toggleStyle(.switch)
             }
                 }
             .padding(32)

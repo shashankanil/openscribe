@@ -5,8 +5,7 @@ enum CredentialStore {
     private static let lock = NSLock()
 
     static func storageURL(rootURL: URL? = nil) -> URL {
-        let root = rootURL ?? applicationSupportDirectory
-            .appendingPathComponent("WhisperFlow", isDirectory: true)
+        let root = rootURL ?? AppPaths.root
         return root.appendingPathComponent(fileName)
     }
 
@@ -72,11 +71,6 @@ enum CredentialStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
         try JSONEncoder().encode(values).write(to: fileURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-    }
-
-    private static var applicationSupportDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
     }
 
     private static func load(from fileURL: URL) throws -> [String: String] {

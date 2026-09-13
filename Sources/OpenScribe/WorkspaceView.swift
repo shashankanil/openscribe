@@ -78,7 +78,7 @@ struct WorkspaceView: View {
                             .padding(.vertical, 24)
                         }
                     }
-                    .padding(.horizontal, 42)
+                    .padding(.horizontal, 32)
                     .padding(.vertical, 10)
                 }
                 .frame(maxHeight: .infinity)
@@ -107,17 +107,12 @@ struct WorkspaceView: View {
                 let note = controller.addManualNote()
                 editingNote = note
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(FlowTheme.ink)
-                    .frame(width: 30, height: 30)
-                    .background(FlowTheme.lavender, in: Circle())
-                    .overlay(Circle().stroke(FlowTheme.ink, lineWidth: 1))
+                Label("New note", systemImage: "square.and.pencil")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlowQuietButtonStyle())
             .help("New note")
         }
-        .padding(.horizontal, 42)
+        .padding(.horizontal, 32)
         .padding(.top, 30)
         .padding(.bottom, 22)
     }
@@ -149,7 +144,7 @@ struct WorkspaceView: View {
 
             Spacer()
         }
-        .padding(.horizontal, 42)
+        .padding(.horizontal, 32)
         .padding(.bottom, 16)
     }
 
@@ -158,15 +153,15 @@ struct WorkspaceView: View {
             Image(systemName: "text.line.first.and.arrowtriangle.forward")
                 .font(.system(size: 22, weight: .light))
                 .foregroundStyle(FlowTheme.lavenderDeep)
-            Text(search.isEmpty ? "Your first thought is one shortcut away." : "No notes match that search.")
+            Text(search.isEmpty ? "Your first note starts here." : "No notes match that search.")
                 .flowUIFont(size: 13, weight: .semibold)
                 .foregroundStyle(FlowTheme.ink)
-            Text(search.isEmpty ? "Press \(controller.settings.shortcutDisplay), speak, and your transcript will appear here." : "Try a different word, app, or filter.")
+            Text(search.isEmpty ? (controller.setupReadiness.canDictate ? "Choose Record a note, speak, then stop to save your transcript here." : "Finish setup to connect your provider and enable microphone access.") : "Try a different word, app, or filter.")
                 .flowUIFont(size: 11)
                 .foregroundStyle(FlowTheme.inkMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(42)
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
@@ -345,7 +340,7 @@ private struct NoteDetailView: View {
                 }
                 .buttonStyle(FlowPrimaryButtonStyle())
             }
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.top, 35)
             .padding(.bottom, 24)
 
@@ -365,7 +360,7 @@ private struct NoteDetailView: View {
             }
             .flowUIFont(size: 11, weight: .medium)
             .foregroundStyle(FlowTheme.inkMuted)
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.bottom, 16)
 
             TextEditor(text: bodyText)
@@ -390,7 +385,7 @@ private struct NoteDetailView: View {
                 }
                 .buttonStyle(FlowQuietButtonStyle())
             }
-            .padding(.horizontal, 42)
+            .padding(.horizontal, 32)
             .padding(.bottom, 18)
         }
         .background(FlowTheme.paper)

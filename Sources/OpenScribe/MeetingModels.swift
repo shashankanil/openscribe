@@ -64,8 +64,8 @@ struct MeetingRecord: Codable, Identifiable {
     var systemLabel = "System audio"
 
     var transcript: String {
-        segments.sorted { $0.start < $1.start }.map {
-            "[\($0.timestamp)] \($0.track == "microphone" ? microphoneLabel : systemLabel)\n\($0.text)"
+        MeetingTranscript.passages(segments).map {
+            "[\(MeetingSegment.timestamp($0.start))] \($0.track == "microphone" ? microphoneLabel : systemLabel)\n\($0.text)"
         }.joined(separator: "\n\n")
     }
     var markdown: String {

@@ -82,7 +82,7 @@ private struct InstallerView: View {
                     .accessibilityLabel("Close installer")
                 }
 
-                Text("Move the signal into Applications, then start dictating.")
+                Text("Install OpenScribe, connect your provider, and try your first note.")
                     .font(.system(size: 13, weight: .regular, design: .rounded))
                     .foregroundStyle(Color.white.opacity(0.60))
                     .padding(.top, 8)
@@ -160,7 +160,7 @@ private struct InstallerView: View {
                     }
                 }
 
-                Text("The installer copies the app, clears its download quarantine, and opens it for you.")
+                Text("Installs in Applications and opens guided setup for your account.")
                     .font(.system(size: 10, weight: .regular, design: .rounded))
                     .foregroundStyle(Color.white.opacity(0.42))
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -174,6 +174,10 @@ private struct InstallerView: View {
 
     private func install() {
         guard state != .installing else { return }
+        if NSRunningApplication.runningApplications(withBundleIdentifier: "org.open-source.openscribe").isEmpty == false {
+            state = .failed("Quit OpenScribe when your recording is finished, then try again.")
+            return
+        }
         state = .installing
         let source = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("OpenScribe.app")
         let target = URL(fileURLWithPath: "/Applications/OpenScribe.app")
@@ -183,7 +187,14 @@ private struct InstallerView: View {
             DispatchQueue.main.async {
                 switch result {
                 case .success:
-                    state = .installed
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.arguments = ["--onboarding"]
+                    NSWorkspace.shared.openApplication(at: target, configuration: configuration) { _, error in
+                        DispatchQueue.main.async {
+                            if let error { state = .failed("Installed, but could not open OpenScribe: \(error.localizedDescription)") }
+                            else { state = .installed }
+                        }
+                    }
                 case .failure(let error):
                     state = .failed(error.localizedDescription)
                 }
@@ -198,19 +209,35 @@ private enum InstallerOperations {
             return .failure(InstallerError.appNotFound(source.path))
         }
 
+        // Stage and verify the complete bundle before replacing an existing installation.
+        let stage = target.deletingLastPathComponent().appendingPathComponent(".OpenScribe-install-\(UUID().uuidString).app")
+        let backup = target.deletingLastPathComponent().appendingPathComponent(".OpenScribe-backup-\(UUID().uuidString).app")
+        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let command = """
+        set -e
+        stage=\(quote(stage.path))
+        target=\(quote(target.path))
+        backup=\(quote(backup.path))
+        trap '/bin/rm -rf "$stage"; if [ -d "$backup" ] && [ ! -e "$target" ]; then /bin/mv "$backup" "$target"; fi' EXIT
+        /usr/bin/ditto --rsrc --extattr --acl \(quote(source.path)) "$stage"
+        /usr/bin/codesign --verify --deep --strict "$stage"
+        /usr/bin/xattr -dr com.apple.quarantine "$stage"
+        if [ -e "$target" ]; then /bin/mv "$target" "$backup"; fi
+        /bin/mv "$stage" "$target"
+        /bin/rm -rf "$backup"
+        """
+        let needsAdministrator = !FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path)
+            || (FileManager.default.fileExists(atPath: target.path) && !FileManager.default.isWritableFile(atPath: target.path))
         let script = """
         on run argv
-            set sourceApp to item 1 of argv
-            set targetApp to item 2 of argv
-            set command to "/bin/rm -rf " & quoted form of targetApp & " && /usr/bin/ditto --rsrc --extattr --acl " & quoted form of sourceApp & " " & quoted form of targetApp & " && /usr/bin/xattr -dr com.apple.quarantine " & quoted form of targetApp & " && /usr/bin/open " & quoted form of targetApp
-            do shell script command with administrator privileges
+            do shell script (item 1 of argv)\(needsAdministrator ? " with administrator privileges" : "")
         end run
         """
 
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script, source.path, target.path]
+        process.arguments = ["-e", script, command]
         process.standardError = output
 
         do {
