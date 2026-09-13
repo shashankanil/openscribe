@@ -277,13 +277,7 @@ final class AppController: ObservableObject {
             recordingSourceApplication = nil
             recordingSourceBundleIdentifier = nil
             activeRecoveryJob = nil
-            Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+            hasFailedRecording = !recovery.jobs.isEmpty
             fail(with: error)
         }
     }
@@ -303,12 +297,6 @@ final class AppController: ObservableObject {
         recorder.cancel()
         if let job = activeRecoveryJob { try? recovery.remove(job.id) }
         activeRecoveryJob = nil
-        Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
         holdToTalkReleasePending = false
         recordingSourceApplication = nil
@@ -326,13 +314,7 @@ final class AppController: ObservableObject {
             // Stable note IDs make recovery safe even if the process died after saving the note.
             if store.hasPersistedNote(job.id) {
                 try recovery.remove(job.id)
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                hasFailedRecording = !recovery.jobs.isEmpty
                 return
             }
             let recording = try recovery.recording(job.id)
@@ -350,12 +332,6 @@ final class AppController: ObservableObject {
     func discardFailedRecording() {
         guard !isDictationBusy, let job = recovery.jobs.first else { return }
         do { try recovery.remove(job.id) } catch { showTransientError(error.localizedDescription) }
-        Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
     }
 
@@ -615,13 +591,7 @@ final class AppController: ObservableObject {
             defer {
                 streaming?.cancel()
                 if job == nil { recording.cleanup() }
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                hasFailedRecording = !recovery.jobs.isEmpty
                 if captureGeneration == generation { self.processingTask = nil }
             }
             do {
@@ -736,13 +706,7 @@ final class AppController: ObservableObject {
                 return
             } catch {
                 guard captureGeneration == generation, !Task.isCancelled else { return }
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                hasFailedRecording = !recovery.jobs.isEmpty
                 NSLog("OpenScribe processing failed: %@", error.localizedDescription)
                 fail(with: error)
             }

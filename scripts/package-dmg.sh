@@ -10,7 +10,7 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     print -u2 "No stable code-signing identity found. Set CODESIGN_IDENTITY or install a signing certificate."
     exit 1
 fi
-CONFIG="${CONFIGURATION:-debug}"
+CONFIG="${CONFIGURATION:-release}"
 OUTPUT_DIR="${PACKAGE_OUTPUT_DIR:-$ROOT/dist}"
 APP="$OUTPUT_DIR/OpenScribe.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppInfo.plist")"

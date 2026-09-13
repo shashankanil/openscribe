@@ -46,6 +46,18 @@ final class ExperienceTests: XCTestCase {
 
     func testServiceDiagnosticsStayOutOfBubble() {
         XCTAssertEqual(UserNotice.summary("HTTP 401 unauthorized"), "Check your provider key in Settings.")
+        XCTAssertEqual(
+            UserNotice.summary("The provider returned an unreadable response."),
+            "That result wasn’t usable. Please try again."
+        )
+        XCTAssertEqual(
+            UserNotice.summary("Provider request failed (HTTP 400): model emitted internal implementation details"),
+            "The provider couldn’t complete this request. Please try again."
+        )
+        XCTAssertEqual(
+            UserNotice.summary("The recording was too short to transcribe."),
+            "We couldn’t find enough speech. Try recording again."
+        )
         XCTAssertLessThan(UserNotice.summary(String(repeating: "diagnostic ", count: 200)).count, 100)
         XCTAssertEqual(UserNotice.summary("Finish the meeting first."), "Finish the meeting first.")
     }
