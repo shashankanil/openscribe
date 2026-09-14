@@ -20,7 +20,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libsecret-1-dev libxdo-dev
       - uses: pnpm/action-setup@v6
         with:
           version: 10
@@ -55,7 +55,7 @@ jobs:
         if: startsWith(matrix.platform, 'ubuntu-')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libasound2-dev libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libasound2-dev libsecret-1-dev libxdo-dev
       - uses: pnpm/action-setup@v6
         with:
           version: 10
