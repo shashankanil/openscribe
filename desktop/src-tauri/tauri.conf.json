@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenScribe",
+  "version": "0.4.0",
+  "identifier": "org.open-source.openscribe",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "OpenScribe",
+      "width": 1180,
+      "height": 760,
+      "minWidth": 940,
+      "minHeight": 650,
+      "center": true,
+      "decorations": true
+    }],
+    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:" }
+  },
+  "bundle": {
+    "active": false,
+    "category": "Productivity",
+    "shortDescription": "Private, provider-powered dictation and meeting notes",
+    "longDescription": "OpenScribe records dictation and meetings, transcribes with your chosen provider, and keeps a searchable local note library."
+  }
+}
