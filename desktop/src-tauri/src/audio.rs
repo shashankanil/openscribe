@@ -43,7 +43,7 @@ pub fn inputs() -> Result<Vec<AudioInput>, String> {
                 || lower.contains("what u hear"),
         });
     }
-    result.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    result.sort_by_key(|input| input.name.to_lowercase());
     Ok(result)
 }
 
