@@ -76,14 +76,13 @@ final class AppStoreTests: XCTestCase {
         XCTAssertNil(note.sourceBundleIdentifier)
         XCTAssertEqual(note.sourceLabel, "Active app unavailable")
     }
-    func testLegacySettingsDefaultToWhisperlightTheme() throws {
-        let json = """
-        {
-          "dictationMode": "toggle"
-        }
-        """
-        let settings = try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
-        XCTAssertEqual(settings.theme, .whisperFlow)
+    func testLegacyAndRetiredThemesFollowSystemAppearance() throws {
+        let legacy = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"dictationMode": "toggle"}"#.utf8))
+        XCTAssertEqual(legacy.theme, .system)
+        let retired = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"theme": "whisperFlow"}"#.utf8))
+        XCTAssertEqual(retired.theme, .system)
+        let dark = try JSONDecoder().decode(AppSettings.self, from: Data(#"{"theme": "dark"}"#.utf8))
+        XCTAssertEqual(dark.theme, .dark)
     }
  
     func testPlaceholderSpeechSettingsMigrateToOpenRouter() throws {
@@ -106,9 +105,10 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(settings.speechModel, "mistralai/voxtral-mini-transcribe")
     }
  
-    func testWhisperlightThemePresentation() {
-        XCTAssertEqual(FlowThemeVariant.whisperFlow.title, "Whisperlight")
-        XCTAssertEqual(FlowThemeVariant.whisperFlow.detail, "Warm paper, lavender, and mint.")
+    func testThemeAppearances() {
+        XCTAssertNil(FlowThemeVariant.system.appearance)
+        XCTAssertEqual(FlowThemeVariant.dark.appearance?.name, .darkAqua)
+        XCTAssertEqual(FlowThemeVariant.light.appearance?.name, .aqua)
     }
 
     func testProviderDefaultsStayActionable() {
@@ -146,4 +146,98 @@ final class AppStoreTests: XCTestCase {
         CredentialStore.remove(account: "language-model-api-key", rootURL: root)
         XCTAssertNil(CredentialStore.read(account: "language-model-api-key", rootURL: root))
     }
+
+    func testUnreadableHistoryIsBackedUpBeforeNewNotesAreSaved() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-corrupt-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = Data("[{broken history".utf8)
+        try original.write(to: root.appendingPathComponent("notes.json"))
+        let store = AppStore(rootURL: root)
+        XCTAssertTrue(store.notes.isEmpty)
+        XCTAssertNotNil(store.storageError)
+        let backup = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix("notes-unreadable-") })
+        XCTAssertEqual(try Data(contentsOf: backup), original)
+        let note = store.addNote(rawText: "Recovered setup", cleanedText: "", duration: 1)
+        XCTAssertTrue(store.hasPersistedNote(note.id))
+        XCTAssertEqual(AppStore(rootURL: root).notes.first?.displayText, "Recovered setup")
+        XCTAssertEqual(try Data(contentsOf: backup), original)
+    }
+
+    func testFailedReadAndBackupBlockWritesToOriginalHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-blocked-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let history = root.appendingPathComponent("notes.json")
+        try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
+        let sentinel = history.appendingPathComponent("keep.txt")
+        try Data("preserve".utf8).write(to: sentinel)
+        let store = AppStore(rootURL: root)
+        XCTAssertTrue(store.storageError?.contains("blocked") == true)
+        var note = store.addManualNote()
+        note.cleanedText = "Unsaved edit"
+        XCTAssertFalse(store.updateNote(note))
+        store.flush()
+        XCTAssertEqual(try String(contentsOf: sentinel, encoding: .utf8), "preserve")
+        XCTAssertFalse(store.hasPersistedNote(note.id))
+    }
+
+    func testWriteFailureIsReportedAndCanRecover() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-write-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(rootURL: root)
+        let history = root.appendingPathComponent("notes.json")
+        try FileManager.default.removeItem(at: history)
+        try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
+        var note = store.addManualNote()
+        note.editedText = "Saved after retry"
+        XCTAssertFalse(store.updateNote(note))
+        XCTAssertNotNil(store.storageError)
+        try FileManager.default.removeItem(at: history)
+        XCTAssertTrue(store.updateNote(note))
+        XCTAssertNil(store.storageError)
+        XCTAssertEqual(AppStore(rootURL: root).notes.first?.displayText, "Saved after retry")
+    }
+
+    func testClearingEditedDictationPreservesEmptyTextAndOriginal() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-edit-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(rootURL: root)
+        var note = store.addNote(rawText: "Original words", cleanedText: "Polished words", duration: 2)
+        note.editedText = ""
+        XCTAssertTrue(store.updateNote(note))
+        let restored = try XCTUnwrap(AppStore(rootURL: root).notes.first)
+        XCTAssertEqual(restored.displayText, "")
+        XCTAssertEqual(restored.rawText, "Original words")
+        XCTAssertEqual(restored.cleanedText, "Polished words")
+    }
+
+    func testEmptyManualDraftDoesNotCreateHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-draft-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(rootURL: root)
+        let draft = store.addManualNote()
+        XCTAssertTrue(store.notes.isEmpty)
+        XCTAssertFalse(store.updateNote(draft))
+        XCTAssertTrue(AppStore(rootURL: root).notes.isEmpty)
+    }
+
+    func testManualDraftSavesOnceAndCanBeClearedWithoutLosingItsIdentity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-draft-save-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppStore(rootURL: root)
+        var draft = store.addManualNote()
+        draft.editedText = "A thought worth keeping."
+        XCTAssertTrue(store.updateNote(draft))
+        XCTAssertEqual(store.notes.count, 1)
+        XCTAssertEqual(store.notes.first?.displayTitle, "A thought worth keeping.")
+        draft.title = "Planning"
+        draft.editedText = ""
+        XCTAssertTrue(store.updateNote(draft))
+        let restored = try XCTUnwrap(AppStore(rootURL: root).notes.first)
+        XCTAssertEqual(store.notes.count, 1)
+        XCTAssertEqual(restored.id, draft.id)
+        XCTAssertEqual(restored.displayText, "")
+        XCTAssertEqual(restored.title, "Planning")
+    }
+
 }

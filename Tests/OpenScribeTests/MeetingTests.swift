@@ -19,6 +19,18 @@ final class MeetingTests: XCTestCase {
         return try store.audioChunks(for: record.id)
     }
 
+    func testOlderMeetingsLoadWithoutNewLabelsAndOptions() throws {
+        let record = MeetingRecord(title: "Legacy meeting", settings: AppSettings())
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
+        for key in ["microphoneLabel", "systemLabel", "liveTranscription", "summarizeOnStop"] { object.removeValue(forKey: key) }
+        let restored = try JSONDecoder().decode(MeetingRecord.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(restored.id, record.id)
+        XCTAssertEqual(restored.microphoneLabel, "Microphone")
+        XCTAssertEqual(restored.systemLabel, "System audio")
+        XCTAssertTrue(restored.summarizeOnStop)
+        XCTAssertNil(restored.liveTranscription)
+    }
+
     func testRestartRecoversTimelineAndCompletedSegments() throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }

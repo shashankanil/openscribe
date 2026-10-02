@@ -1,110 +1,39 @@
+import AppKit
 import SwiftUI
 
+/// Design tokens. Every color resolves against the current appearance, so views follow
+/// the system (or the theme chosen in Settings) without being rebuilt.
 enum FlowTheme {
-    private(set) static var variant: FlowThemeVariant = .whisperFlow
-
-    static func apply(_ variant: FlowThemeVariant) {
-        self.variant = variant
+    private static func rgb(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha)
     }
 
-    static var paper: Color {
-        switch variant {
-        case .light:
-            return Color(red: 1.0, green: 1.0, blue: 1.0)
-        case .dark:
-            return Color(red: 0.10, green: 0.095, blue: 0.12)
-        case .whisperFlow:
-            return Color(red: 1.0, green: 1.0, blue: 0.92)
-        }
+    private static func dynamic(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
     }
 
-    static var paperMuted: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.95, green: 0.95, blue: 0.97)
-        case .dark:
-            return Color(red: 0.16, green: 0.15, blue: 0.18)
-        case .whisperFlow:
-            return Color(red: 0.96, green: 0.96, blue: 0.88)
-        }
-    }
+    static let background = dynamic(light: rgb(0.975, 0.970, 0.951), dark: rgb(0.067, 0.071, 0.067))
+    static let surface = dynamic(light: rgb(0.998, 0.997, 0.988), dark: rgb(0.110, 0.118, 0.110))
+    static let surfaceMuted = dynamic(light: rgb(0.15, 0.17, 0.12, 0.05), dark: rgb(0.98, 0.97, 0.92, 0.06))
+    static let surfaceHover = dynamic(light: rgb(0.15, 0.17, 0.12, 0.08), dark: rgb(0.98, 0.97, 0.92, 0.10))
+    static let line = dynamic(light: rgb(0.15, 0.17, 0.12, 0.12), dark: rgb(0.98, 0.97, 0.92, 0.10))
 
-    static var ink: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.08, green: 0.08, blue: 0.10)
-        case .dark:
-            return Color(red: 0.94, green: 0.93, blue: 0.90)
-        case .whisperFlow:
-            return Color(red: 0.10, green: 0.10, blue: 0.10)
-        }
-    }
+    static let ink = dynamic(light: rgb(0.12, 0.14, 0.11), dark: rgb(0.96, 0.95, 0.91))
+    static let inkMuted = dynamic(light: rgb(0.12, 0.14, 0.11, 0.65), dark: rgb(0.96, 0.95, 0.91, 0.65))
+    static let inkFaint = dynamic(light: rgb(0.12, 0.14, 0.11, 0.48), dark: rgb(0.96, 0.95, 0.91, 0.46))
 
-    static var inkMuted: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.35, green: 0.35, blue: 0.39)
-        case .dark:
-            return Color(red: 0.67, green: 0.66, blue: 0.70)
-        case .whisperFlow:
-            return Color(red: 0.33, green: 0.32, blue: 0.29)
-        }
-    }
+    static let accent = dynamic(light: rgb(0.68, 0.32, 0.10), dark: rgb(0.94, 0.72, 0.39))
+    static let accentSoft = dynamic(light: rgb(0.68, 0.32, 0.10, 0.08), dark: rgb(0.94, 0.72, 0.39, 0.10))
+    static let primaryText = dynamic(light: rgb(1, 0.99, 0.96), dark: rgb(0.12, 0.14, 0.11))
+    static let recording = dynamic(light: rgb(0.91, 0.24, 0.27), dark: rgb(1.0, 0.39, 0.40))
+    static let success = dynamic(light: rgb(0.13, 0.62, 0.38), dark: rgb(0.30, 0.82, 0.55))
+    static let warning = dynamic(light: rgb(0.80, 0.50, 0.05), dark: rgb(1.0, 0.72, 0.28))
 
-    static var line: Color {
-        switch variant {
-        case .dark:
-            return Color.white.opacity(0.18)
-        default:
-            return ink.opacity(0.18)
-        }
-    }
-
-    static var lavender: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.89, green: 0.81, blue: 1.0)
-        case .dark:
-            return Color(red: 0.35, green: 0.25, blue: 0.48)
-        case .whisperFlow:
-            return Color(red: 0.94, green: 0.84, blue: 1.0)
-        }
-    }
-
-    static var lavenderDeep: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.42, green: 0.27, blue: 0.60)
-        case .dark:
-            return Color(red: 0.79, green: 0.67, blue: 1.0)
-        case .whisperFlow:
-            return Color(red: 0.57, green: 0.38, blue: 0.70)
-        }
-    }
-
-    static var mint: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.78, green: 0.93, blue: 0.85)
-        case .dark:
-            return Color(red: 0.28, green: 0.55, blue: 0.42)
-        case .whisperFlow:
-            return Color(red: 0.82, green: 0.94, blue: 0.88)
-        }
-    }
-
-    static var coral: Color {
-        switch variant {
-        case .light:
-            return Color(red: 0.84, green: 0.30, blue: 0.32)
-        case .dark:
-            return Color(red: 1.0, green: 0.48, blue: 0.50)
-        case .whisperFlow:
-            return Color(red: 1.0, green: 0.65, blue: 0.62)
-        }
-    }
+    static let spring = Animation.spring(response: 0.32, dampingFraction: 0.82)
 }
- 
+
 struct WhisperlightLogo: View {
     let size: CGFloat
 
@@ -133,7 +62,7 @@ struct WhisperlightLogo: View {
             )
             .frame(width: size, height: size)
             .shadow(color: .black.opacity(0.22), radius: size * 0.14, y: size * 0.06)
-            .accessibilityLabel("Whisperlight voice waveform")
+            .accessibilityLabel("OpenScribe")
     }
 }
 
@@ -167,91 +96,40 @@ struct WhisperlightWave: Shape {
         return path
     }
 }
- 
- 
+
+/// Native translucency for the sidebar and floating panels.
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .sidebar
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.state = .active
+        view.material = material
+        view.blendingMode = blendingMode
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+        view.blendingMode = blendingMode
+    }
+}
 
 extension View {
-    func flowDisplayFont(size: CGFloat, weight: Font.Weight = .regular) -> some View {
-        font(.system(size: size, design: .serif).weight(weight))
+    func flowCard(padding: CGFloat = 18, radius: CGFloat = 14) -> some View {
+        self.padding(padding)
+            .background(FlowTheme.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(FlowTheme.line, lineWidth: 1))
+            .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
     }
 
-    func flowUIFont(size: CGFloat, weight: Font.Weight = .regular) -> some View {
-        font(.system(size: size, design: .rounded).weight(weight))
-    }
-
-    func flowCard(inset: CGFloat = 18) -> some View {
-        self.padding(inset)
-            .background(FlowTheme.paper, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(FlowTheme.ink, lineWidth: 1.5))
-    }
-
-    func flowPill() -> some View {
-        padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(FlowTheme.paperMuted, in: Capsule())
-            .overlay(Capsule().stroke(FlowTheme.ink, lineWidth: 1))
-    }
-
-
-    func flowFieldRow() -> some View {
-        padding(.vertical, 3)
-    }
-}
-
-struct FlowPrimaryButtonStyle: ButtonStyle {
-    var tint: Color = FlowTheme.lavender
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .flowUIFont(size: 13, weight: .semibold)
-            .foregroundStyle(FlowTheme.ink)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .background(tint, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(FlowTheme.ink, lineWidth: 1.5))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-struct FlowQuietButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .flowUIFont(size: 12, weight: .medium)
-            .foregroundStyle(FlowTheme.ink)
-            .padding(.horizontal, 12)
+    func flowField() -> some View {
+        textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .padding(.horizontal, 11)
             .padding(.vertical, 8)
-            .background(configuration.isPressed ? FlowTheme.paperMuted : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
-struct FlowMenuItemStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(configuration.isPressed ? FlowTheme.lavender : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
-struct FlowSectionHeading: View {
-    let eyebrow: String
-    let title: String
-    let detail: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(eyebrow.uppercased())
-                .flowUIFont(size: 10, weight: .semibold)
-                .tracking(1.4)
-                .foregroundStyle(FlowTheme.lavenderDeep)
-            Text(title)
-                .flowDisplayFont(size: 32)
-                .foregroundStyle(FlowTheme.ink)
-            if let detail {
-                Text(detail)
-                    .flowUIFont(size: 13)
-                    .foregroundStyle(FlowTheme.inkMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+            .background(FlowTheme.surfaceMuted, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(FlowTheme.line, lineWidth: 1))
     }
 }

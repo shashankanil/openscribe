@@ -11,14 +11,22 @@ final class AppController: ObservableObject {
     let recorder: AudioRecorder
     let hotkey: GlobalHotkey
     let providerClient: ProviderClient
-    let meetings = MeetingController()
-    let calendar = CalendarMeetingController()
+    let meetings: MeetingController
+    let calendar: CalendarMeetingController
     private var calendarSubscription: AnyCancellable?
     private var meetingSubscription: AnyCancellable?
     private var noticeSubscriptions = Set<AnyCancellable>()
     let permissions: PermissionCenter
 
-    @Published private(set) var capturePhase: CapturePhase = .idle
+    @Published private(set) var capturePhase: CapturePhase = .idle {
+        didSet {
+            if capturePhase != .recording { captureStartedAt = nil }
+            else if oldValue != .recording { captureStartedAt = Date() }
+        }
+    }
+    @Published private(set) var captureStartedAt: Date?
+    @Published private(set) var toast: String?
+    @Published private(set) var launchAtLogin = LoginItem.isRequested
     @Published private(set) var captureHint = "⌥ Space to speak"
     @Published private(set) var currentTranscript = ""
     @Published private(set) var lastError: String?
@@ -35,19 +43,33 @@ final class AppController: ObservableObject {
     private let sounds = CaptureSounds()
     private var startTask: Task<Void, Never>?
     private var hotkeyStarted = false
+    private var shortcutCaptureActive = false
     private var hasBooted = false
     private var holdToTalkReleasePending = false
     private var transientErrorTask: Task<Void, Never>?
     @Published private(set) var hasFailedRecording = false
-    private let recovery = DictationRecoveryStore()
+    private let recovery: DictationRecoveryStore
+    private let dataRoot: URL
     private var activeRecoveryJob: DictationJob?
     private var dictationStreaming: LiveAudioPipeline?
     private var dictationLive: DictationLiveTranscriber?
     private var recordingSourceApplication: String?
     private var recordingSourceBundleIdentifier: String?
+    private var lastExternalApplication: NSRunningApplication?
+    private var activationObserver: NSObjectProtocol?
+    private var toastTask: Task<Void, Never>?
+    private var readyTask: Task<Void, Never>?
 
-    private init() {
-        store = AppStore()
+    var hasCompletedSetup: Bool { UserDefaults.standard.bool(forKey: setupCompletedKey) }
+    var storageRoot: URL { dataRoot }
+
+    init(rootURL: URL? = nil) {
+        let root = rootURL ?? AppPaths.root
+        dataRoot = root
+        store = AppStore(rootURL: root)
+        meetings = MeetingController(store: MeetingStore(root: root.appendingPathComponent("Meetings")), credentialRootURL: root)
+        calendar = CalendarMeetingController()
+        recovery = DictationRecoveryStore(root: root.appendingPathComponent("DictationRecovery"))
         recorder = AudioRecorder()
         permissions = PermissionCenter()
         hotkey = GlobalHotkey()
@@ -55,6 +77,7 @@ final class AppController: ObservableObject {
         recorder.onInterruption = { [weak self] error in
             guard let self, self.capturePhase == .recording else { return }
             self.finishCapture()
+            self.showTransientError("Recording stopped because the microphone was interrupted. Captured audio is kept for transcription or recovery.\n\n\(error.localizedDescription)")
         }
         meetingSubscription = meetings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         calendarSubscription = calendar.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
@@ -65,10 +88,29 @@ final class AppController: ObservableObject {
                 self?.showTransientError(message)
             }.store(in: &noticeSubscriptions)
         hasFailedRecording = !recovery.jobs.isEmpty
+        store.$storageError.removeDuplicates().sink { [weak self] message in
+            if let message { self?.showTransientError(message) }
+        }.store(in: &noticeSubscriptions)
         if let error = recovery.error { lastError = error }
-        do { try CredentialStore.migrateLegacy(settings: store.settings) }
+        do { try CredentialStore.migrateLegacy(settings: store.settings, rootURL: root) }
         catch { lastError = "Could not migrate provider credentials: \(error.localizedDescription)" }
-        FlowTheme.apply(store.settings.theme)
+        lastExternalApplication = NSWorkspace.shared.frontmostApplication.flatMap(Self.external)
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            Task { @MainActor in
+                if let application = application.flatMap(Self.external) { self?.lastExternalApplication = application }
+            }
+        }
+    }
+
+    private static func external(_ application: NSRunningApplication) -> NSRunningApplication? {
+        application.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : application
+    }
+
+    private func refreshRecoveryState() {
+        hasFailedRecording = !recovery.jobs.isEmpty
     }
 
     var isDictationBusy: Bool { startTask != nil || processingTask != nil || capturePhase == .recording }
@@ -85,8 +127,7 @@ final class AppController: ObservableObject {
         return (application.localizedName, application.bundleIdentifier)
     }
     private func applyTheme(_ theme: FlowThemeVariant) {
-        FlowTheme.apply(theme)
-        NSApp.appearance = NSAppearance(named: theme.appearanceName)
+        NSApp.appearance = theme.appearance
     }
 
     func boot() {
@@ -121,6 +162,24 @@ final class AppController: ObservableObject {
         }
     }
 
+    func pasteLastFromQuickPanel() {
+        guard canPasteLast, let target = lastExternalApplication, !target.isTerminated,
+              let bundleID = target.bundleIdentifier, let note = notes.first else { return }
+        pasteLastTask = Task { @MainActor in
+            defer { pasteLastTask = nil; objectWillChange.send() }
+            do { try await TextInjector.paste(note.displayText, into: bundleID) }
+            catch { showTransientError("Paste failed · transcript is still saved.\n\n\(error.localizedDescription)") }
+        }
+    }
+
+    /// The menu bar panel makes OpenScribe frontmost, so dictation returns to the app used before it.
+    func toggleCaptureFromQuickPanel() {
+        guard capturePhase != .recording, startTask == nil else { toggleCapture(); return }
+        let target = lastExternalApplication.flatMap { $0.isTerminated ? nil : $0 }
+        target?.activate()
+        startCapture(target: target)
+    }
+
     func toggleCapture() {
         if startTask != nil {
             holdToTalkReleasePending = true
@@ -136,12 +195,14 @@ final class AppController: ObservableObject {
         }
     }
 
-    func startCapture() {
+    func startCapture(target: NSRunningApplication? = nil) {
         guard !meetings.occupiesCapture else {
             showTransientError("Finish the meeting recording before starting dictation.")
             return
         }
         guard startTask == nil, processingTask == nil, pasteLastTask == nil, capturePhase != .recording else { return }
+        readyTask?.cancel()
+        readyTask = nil
         let generation = UUID()
         captureGeneration = generation
         holdToTalkReleasePending = false
@@ -156,7 +217,8 @@ final class AppController: ObservableObject {
             showPermissions()
             return
         }
-        let activeApplication = activeApplicationMetadata()
+        let activeApplication = target.map { (name: $0.localizedName, bundleIdentifier: $0.bundleIdentifier) }
+            ?? activeApplicationMetadata()
         recordingSourceApplication = activeApplication.name
         recordingSourceBundleIdentifier = activeApplication.bundleIdentifier
 
@@ -276,19 +338,16 @@ final class AppController: ObservableObject {
             dictationLive = nil
             recordingSourceApplication = nil
             recordingSourceBundleIdentifier = nil
+            if case RecorderError.emptyRecording = error, let job = activeRecoveryJob { try? recovery.remove(job.id) }
             activeRecoveryJob = nil
-            Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+            refreshRecoveryState()
             fail(with: error)
         }
     }
 
     func cancelCapture() {
+        readyTask?.cancel()
+        readyTask = nil
         captureGeneration = UUID()
         dictationStreaming?.cancel()
         dictationStreaming = nil
@@ -303,13 +362,7 @@ final class AppController: ObservableObject {
         recorder.cancel()
         if let job = activeRecoveryJob { try? recovery.remove(job.id) }
         activeRecoveryJob = nil
-        Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+        refreshRecoveryState()
         holdToTalkReleasePending = false
         recordingSourceApplication = nil
         recordingSourceBundleIdentifier = nil
@@ -326,13 +379,7 @@ final class AppController: ObservableObject {
             // Stable note IDs make recovery safe even if the process died after saving the note.
             if store.hasPersistedNote(job.id) {
                 try recovery.remove(job.id)
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                refreshRecoveryState()
                 return
             }
             let recording = try recovery.recording(job.id)
@@ -350,13 +397,7 @@ final class AppController: ObservableObject {
     func discardFailedRecording() {
         guard !isDictationBusy, let job = recovery.jobs.first else { return }
         do { try recovery.remove(job.id) } catch { showTransientError(error.localizedDescription) }
-        Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+        refreshRecoveryState()
     }
 
     func prepareDictationToQuit() async {
@@ -383,7 +424,7 @@ final class AppController: ObservableObject {
         if workspaceWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
-                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
@@ -391,7 +432,7 @@ final class AppController: ObservableObject {
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 940, height: 700)
+            window.minSize = NSSize(width: 900, height: 620)
             window.setFrameAutosaveName("OpenScribeWorkspace")
             window.center()
             workspaceWindow = window
@@ -425,22 +466,9 @@ final class AppController: ObservableObject {
         openMainWindow()
     }
 
-    func dismissPermissions(markOnboardingComplete: Bool = true) {
-        permissions.refresh()
-        if markOnboardingComplete {
-            permissions.markOnboardingSeen()
-        }
-        startHotkeyIfAllowed()
-        workspaceSection = .notes
-    }
-
-    func disablePasteInjectionAndDismissPermissions() {
-        updateSettings { $0.pasteIntoFocusedApp = false }
-        dismissPermissions(markOnboardingComplete: true)
-    }
-
     func refreshPermissions() {
         permissions.refresh()
+        if launchAtLogin != LoginItem.isRequested { launchAtLogin = LoginItem.isRequested }
         startHotkeyIfAllowed()
         objectWillChange.send()
     }
@@ -468,7 +496,7 @@ final class AppController: ObservableObject {
         }
     }
     private func startHotkeyIfAllowed() {
-        guard permissions.accessibilityTrusted else { return }
+        guard permissions.accessibilityTrusted, !shortcutCaptureActive else { return }
         if !hotkeyStarted {
             hotkeyStarted = true
             configureHotkey()
@@ -499,6 +527,11 @@ final class AppController: ObservableObject {
         guard hotkeyStarted else { return }
         configureHotkey()
     }
+    func setShortcutCaptureActive(_ active: Bool) {
+        shortcutCaptureActive = active
+        if active { hotkey.stop(); hotkeyStarted = false }
+        else { startHotkeyIfAllowed() }
+    }
     func updateShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String) {
         updateSettings {
             $0.shortcutKeyCode = keyCode
@@ -507,32 +540,70 @@ final class AppController: ObservableObject {
         }
     }
 
+    func open(_ section: WorkspaceSection) {
+        workspaceSection = section
+        openMainWindow()
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do { try LoginItem.setEnabled(enabled) }
+        catch { showTransientError(error.localizedDescription) }
+        launchAtLogin = LoginItem.isRequested
+    }
+
+    /// Short confirmation inside the main window.
+    func flash(_ message: String) {
+        toastTask?.cancel()
+        toast = message
+        toastTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_800_000_000) } catch { return }
+            self?.toast = nil
+        }
+    }
+
+    func report(_ error: Error) { showTransientError(error.localizedDescription) }
+
+    func dismissNotice() {
+        transientErrorTask?.cancel()
+        transientErrorTask = nil
+        noticePanel?.orderOut(nil)
+    }
+
     func openSettings() {
         workspaceSection = .general
         openMainWindow()
     }
 
     func credential(for key: CredentialKey, settings configuration: AppSettings? = nil) -> String {
-        CredentialStore.read(for: key, settings: configuration ?? settings) ?? ""
+        CredentialStore.read(for: key, settings: configuration ?? settings, rootURL: dataRoot) ?? ""
     }
 
-    func updateSettings(_ update: (inout AppSettings) -> Void) {
+    func saveSpeechCredential(_ value: String) throws {
+        try CredentialStore.save(value, account: CredentialScope(.speech, settings: settings).account, rootURL: dataRoot)
+        objectWillChange.send()
+    }
+
+    @discardableResult
+    func updateSettings(_ update: (inout AppSettings) -> Void) -> Bool {
         var updated = store.settings
         let previousDictationMode = updated.dictationMode
         let previousShortcutKeyCode = updated.shortcutKeyCode
         let previousShortcutModifiers = updated.shortcutModifiers
         let previousTheme = updated.theme
         update(&updated)
-        store.settings = updated
+        guard store.saveSettings(updated) else { objectWillChange.send(); return false }
         if previousTheme != updated.theme {
             applyTheme(updated.theme)
         }
+        if updated.showOverlayWhenIdle || isDictationBusy { showOverlay() }
+        else { hideOverlay() }
         objectWillChange.send()
         if previousDictationMode != updated.dictationMode
             || previousShortcutKeyCode != updated.shortcutKeyCode
             || previousShortcutModifiers != updated.shortcutModifiers {
             restartHotkey()
         }
+        return true
     }
 
     func selectSpeechProvider(_ provider: SpeechProvider) {
@@ -552,9 +623,11 @@ final class AppController: ObservableObject {
         return note
     }
 
-    func updateNote(_ note: VoiceNote) {
-        store.updateNote(note)
+    @discardableResult
+    func updateNote(_ note: VoiceNote) -> Bool {
+        let saved = store.updateNote(note)
         objectWillChange.send()
+        return saved
     }
 
     func deleteNote(_ note: VoiceNote) {
@@ -615,13 +688,7 @@ final class AppController: ObservableObject {
             defer {
                 streaming?.cancel()
                 if job == nil { recording.cleanup() }
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                refreshRecoveryState()
                 if captureGeneration == generation { self.processingTask = nil }
             }
             do {
@@ -645,7 +712,9 @@ final class AppController: ObservableObject {
                     }
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { rawChunks.append(text) }
                 }
-                guard !rawChunks.isEmpty else { throw ProviderClient.ClientError.malformedResponse }
+                guard !rawChunks.isEmpty else {
+                    throw ProviderClient.ClientError.provider(message: "No speech was detected. Your recording is kept in Notes so you can retry.")
+                }
                 try Task.checkCancellation()
                 let raw = rawChunks.joined(separator: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -707,7 +776,7 @@ final class AppController: ObservableObject {
                     showTransientError("Transcript saved; cleanup unavailable: \(cleanupFailure.localizedDescription)")
                 }
 
-                if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible {
+                if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible && sourceBundleIdentifier != nil {
                     do {
                         try await TextInjector.paste(note.displayText, into: sourceBundleIdentifier)
                     } catch {
@@ -726,23 +795,20 @@ final class AppController: ObservableObject {
                 }
 
                 if capturePhase == .ready {
-                    capturePhase = .idle
-                    captureHint = idleHint
-                    if !settings.showOverlayWhenIdle {
-                        hideOverlay()
+                    readyTask = Task { @MainActor [weak self] in
+                        do { try await Task.sleep(nanoseconds: 1_100_000_000) } catch { return }
+                        guard let self, self.captureGeneration == generation, self.capturePhase == .ready else { return }
+                        self.capturePhase = .idle
+                        self.captureHint = self.idleHint
+                        if !self.settings.showOverlayWhenIdle { self.hideOverlay() }
+                        self.readyTask = nil
                     }
                 }
             } catch is CancellationError {
                 return
             } catch {
                 guard captureGeneration == generation, !Task.isCancelled else { return }
-                Publishers.Merge(meetings.$error, calendar.$error)
-            .removeDuplicates()
-            .sink { [weak self] message in
-                guard let message, !message.isEmpty else { return }
-                self?.showTransientError(message)
-            }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+                refreshRecoveryState()
                 NSLog("OpenScribe processing failed: %@", error.localizedDescription)
                 fail(with: error)
             }
@@ -779,7 +845,8 @@ final class AppController: ObservableObject {
         }
     }
 
-    func inspectNotice() {
+    func inspectNotice(_ message: String? = nil) {
+        if let message { lastError = message }
         noticePanel?.orderOut(nil)
         openMainWindow()
         noticeDetailsVisible = true

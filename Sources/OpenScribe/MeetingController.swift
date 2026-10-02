@@ -11,6 +11,7 @@ final class MeetingController: ObservableObject {
     private let provider = ProviderClient()
     private let speechKey: (() -> String)?
     private let languageKey: (() -> String)?
+    private let credentialRootURL: URL?
     @Published private(set) var activeID: UUID?
     @Published private(set) var isRecording = false
     @Published private(set) var isPaused = false
@@ -32,7 +33,8 @@ final class MeetingController: ObservableObject {
     private var storeSubscription: AnyCancellable?
 
     init(store: MeetingStore? = nil, speechKey: (() -> String)? = nil,
-         languageKey: (() -> String)? = nil) {
+         languageKey: (() -> String)? = nil, credentialRootURL: URL? = nil) {
+        self.credentialRootURL = credentialRootURL
         self.speechKey = speechKey
         self.languageKey = languageKey
         let store = store ?? MeetingStore()
@@ -75,7 +77,7 @@ final class MeetingController: ObservableObject {
         streamingPartials = [:]
         if liveTranscription, settings.automaticStreaming, let capability = StreamingCapability.resolve(settings) {
             let recordingID = record.id
-            streaming = LiveAudioPipeline(capability: capability, apiKey: speechKey?() ?? CredentialStore.read(for: .speech, settings: settings) ?? "", onPartial: { [weak self] url, text in
+            streaming = LiveAudioPipeline(capability: capability, apiKey: speechKey?() ?? CredentialStore.read(for: .speech, settings: settings, rootURL: credentialRootURL) ?? "", onPartial: { [weak self] url, text in
                 Task { @MainActor in
                     guard let self, self.activeID == recordingID,
                           let latest = self.store.record(recordingID),
@@ -259,7 +261,7 @@ final class MeetingController: ObservableObject {
               let url = store.audioURL(meetingID: id, relativePath: chunk.id) else { return }
         var segment = chunk
         if streamingID == id, let text = try await streaming?.result(for: url) { segment.text = text }
-        else { segment.text = try await provider.transcribeReliably(audioFile: url, settings: record.settings, apiKey: speechKey?() ?? CredentialStore.read(for: .speech, settings: record.settings) ?? "") }
+        else { segment.text = try await provider.transcribeReliably(audioFile: url, settings: record.settings, apiKey: speechKey?() ?? CredentialStore.read(for: .speech, settings: record.settings, rootURL: credentialRootURL) ?? "") }
         try Task.checkCancellation()
         guard var latest = store.record(id) else { return }
         if !latest.segments.contains(where: { $0.id == segment.id }) { latest.segments.append(segment) }
@@ -334,7 +336,7 @@ final class MeetingController: ObservableObject {
             Use empty arrays when there is no evidence. Limit each category to 8 points. Preserve the meeting's language.
             """
             let response = try await provider.generate(input, system: system, settings: record.settings,
-                apiKey: languageKey?() ?? CredentialStore.read(for: .languageModel, settings: record.settings) ?? "")
+                apiKey: languageKey?() ?? CredentialStore.read(for: .languageModel, settings: record.settings, rootURL: credentialRootURL) ?? "")
             let json = response.trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: "```json", with: "").replacingOccurrences(of: "```", with: "")
             let summary = try JSONDecoder().decode(MeetingSummary.self, from: Data(json.utf8))

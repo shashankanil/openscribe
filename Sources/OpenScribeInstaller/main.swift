@@ -39,31 +39,15 @@ private struct InstallerView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.055, green: 0.065, blue: 0.09), Color(red: 0.12, green: 0.10, blue: 0.16)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            Circle()
-                .fill(Color(red: 0.67, green: 0.51, blue: 0.86).opacity(0.18))
-                .frame(width: 270, height: 270)
-                .blur(radius: 12)
-                .offset(x: 250, y: -190)
-
-            Circle()
-                .fill(Color(red: 0.42, green: 0.90, blue: 0.73).opacity(0.10))
-                .frame(width: 220, height: 220)
-                .blur(radius: 20)
-                .offset(x: -270, y: 220)
+            Color(red: 0.067, green: 0.071, blue: 0.067)
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("OPENSCRIBE")
+                        Text("OPENSCRIBE \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .tracking(2.2)
-                            .foregroundStyle(Color(red: 0.73, green: 0.64, blue: 0.98))
+                            .foregroundStyle(Color(red: 0.94, green: 0.72, blue: 0.39))
                         Text("Speak it. OpenScribe types it.")
                             .font(.system(size: 28, weight: .medium, design: .serif))
                             .foregroundStyle(Color(red: 0.98, green: 0.97, blue: 0.91))
@@ -90,13 +74,13 @@ private struct InstallerView: View {
                 HStack(spacing: 16) {
                     InstallerTile(
                         label: "OpenScribe",
-                        tint: Color(red: 0.73, green: 0.64, blue: 0.98),
+                        tint: Color(red: 0.94, green: 0.72, blue: 0.39),
                         content: AnyView(InstallerLogo())
                     )
 
                     HStack(spacing: 5) {
                         WaveformLine()
-                            .stroke(Color(red: 0.73, green: 0.64, blue: 0.98).opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                            .stroke(Color(red: 0.94, green: 0.72, blue: 0.39).opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round))
                             .frame(width: 76, height: 28)
                         Image(systemName: "arrow.right")
                             .font(.system(size: 18, weight: .semibold))
@@ -106,12 +90,12 @@ private struct InstallerView: View {
 
                     InstallerTile(
                         label: "Applications",
-                        tint: Color(red: 0.42, green: 0.90, blue: 0.73),
+                        tint: Color(red: 0.82, green: 0.81, blue: 0.75),
                         content: AnyView(
                             Image(systemName: "folder.fill")
                                 .font(.system(size: 54, weight: .medium))
                                 .symbolRenderingMode(.hierarchical)
-                                .foregroundStyle(Color(red: 0.42, green: 0.90, blue: 0.73))
+                                .foregroundStyle(Color(red: 0.82, green: 0.81, blue: 0.75))
                         )
                     )
                 }
@@ -130,13 +114,13 @@ private struct InstallerView: View {
                         HStack(spacing: 10) {
                             ProgressView()
                                 .controlSize(.small)
-                                .tint(Color(red: 0.10, green: 0.08, blue: 0.13))
+                                .tint(Color(red: 0.067, green: 0.071, blue: 0.067))
                             Text("Preparing OpenScribe…")
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(Color(red: 0.73, green: 0.64, blue: 0.98), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .foregroundStyle(Color(red: 0.10, green: 0.08, blue: 0.13))
+                        .background(Color(red: 0.94, green: 0.72, blue: 0.39), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .foregroundStyle(Color(red: 0.067, green: 0.071, blue: 0.067))
                     case .installed:
                         Button {
                             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/OpenScribe.app"))
@@ -293,7 +277,7 @@ private struct InstallerLogo: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color(red: 0.035, green: 0.045, blue: 0.065))
+                .fill(Color(red: 0.067, green: 0.071, blue: 0.067))
             WaveformLine()
                 .stroke(Color(red: 1.0, green: 0.98, blue: 0.90), style: StrokeStyle(lineWidth: 4.5, lineCap: .round, lineJoin: .round))
                 .padding(18)
@@ -320,11 +304,11 @@ private struct InstallerPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 14, weight: .bold, design: .rounded))
-            .foregroundStyle(Color(red: 0.10, green: 0.08, blue: 0.13))
+            .foregroundStyle(Color(red: 0.067, green: 0.071, blue: 0.067))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
-            .background(Color(red: 0.73, green: 0.64, blue: 0.98), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: Color.black.opacity(0.25), radius: 18, y: 8)
+            .background(Color(red: 0.94, green: 0.72, blue: 0.39), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: Color.black.opacity(0.10), radius: 3, y: 2)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .opacity(configuration.isPressed ? 0.88 : 1)
     }

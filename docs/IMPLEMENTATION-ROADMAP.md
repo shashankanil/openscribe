@@ -16,9 +16,9 @@ Status describes OpenScribe. References describe Wispr Flow's public behavior, n
 | D3 | Language controls | Partial: recognition depends on the provider; no explicit language picker or provider capability display | 2 | [Feature overview](https://wisprflow.ai/features) |
 | D4 | Context and writing styles | Partial: bundle-ID tone overrides; no site/category routing or surrounding-text context | 2, 5 | [Feature overview](https://wisprflow.ai/features) |
 | W1 | Hands-free gestures and shortcuts | Partial: one toggle/hold binding, Globe always holds; paste-latest-note menu action added; no double-tap lock, separate global actions, Escape cancel or mouse buttons | 3 | [Shortcut guide](https://docs.wisprflow.ai/articles/5298382595-route-dictation-directly-to-slack-email-or-calendar-with-keyboard-shortcuts) |
-| W2 | Flowbar controls | Partial: waveform and three presets; no persistent drag position, stop button, timer, mic/language switcher or snooze | 3 | [Desktop navigation](https://docs.wisprflow.ai/articles/5096240724-navigating-the-wispr-flow-app-desktop-ios-and-android) |
-| W3 | System conveniences | Missing: launch-at-login setting, dock visibility setting, music muting and notification preferences | 3 | [Desktop navigation](https://docs.wisprflow.ai/articles/5096240724-navigating-the-wispr-flow-app-desktop-ios-and-android) |
-| P1 | Snippet management and expansion | Partial: add/remove and exact whole-utterance plain text; no editing/search/import, mid-sentence expansion or rich text | 4 | [Snippets](https://docs.wisprflow.ai/articles/5784437944-create-and-use-snippets), [release notes](https://wisprflow.ai/whats-new) |
+| W2 | Flowbar controls | Partial: waveform, three presets, stop/cancel buttons, elapsed timer and processing/saved feedback; remaining: persistent drag position, mic/language switcher and snooze | 3 | [Desktop navigation](https://docs.wisprflow.ai/articles/5096240724-navigating-the-wispr-flow-app-desktop-ios-and-android) |
+| W3 | System conveniences | Partial: launch-at-login setting and onboarding option implemented; remaining: dock visibility setting, music muting and notification preferences | 3 | [Desktop navigation](https://docs.wisprflow.ai/articles/5096240724-navigating-the-wispr-flow-app-desktop-ios-and-android) |
+| P1 | Snippet management and expansion | Partial: add/edit/remove and exact whole-utterance plain text; no search/import, mid-sentence expansion or rich text | 4 | [Snippets](https://docs.wisprflow.ai/articles/5784437944-create-and-use-snippets), [release notes](https://wisprflow.ai/whats-new) |
 | N1 | Notes/scratchpad | Partial: searchable plain-text notes, pins, inline editing and copy; no quick-capture shortcut, versions, rich text, tabs or images | 4 | [Release notes](https://wisprflow.ai/whats-new) |
 | N2 | History audio playback | Missing: retained audio is not attached to a note or playable in the UI | 4 | [Release notes](https://wisprflow.ai/whats-new) |
 | N3 | Insights | Missing: total words, WPM, streaks, app breakdown and communication insights | 4 | [Desktop navigation](https://docs.wisprflow.ai/articles/5096240724-navigating-the-wispr-flow-app-desktop-ios-and-android), [release notes](https://wisprflow.ai/whats-new) |
@@ -36,7 +36,7 @@ Existing foundations: system-wide dictation, provider selection, optional cleanu
 
 ## Current verification
 
-29 automated tests cover persistence, recovery checkpoints, PCM system-audio conversion/timestamps, citation IDs, clipboard restoration, shortcut release, dictionary boundaries and settings migration. Real meeting hardware, sleep/unplug behavior, provider quality and end-to-end recording still need hands-on validation. Source labels distinguish microphone/system audio, not individual speakers.
+77 automated tests cover persistence, recovery checkpoints, PCM system-audio conversion/timestamps, citation IDs, clipboard restoration, shortcut release, dictionary boundaries and settings migration. Real meeting hardware, sleep/unplug behavior, provider quality and end-to-end recording still need hands-on validation. Source labels distinguish microphone/system audio, not individual speakers.
 
 ## Implementation batches
 

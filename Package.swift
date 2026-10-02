@@ -11,8 +11,13 @@ let package = Package(
         .executable(name: "OpenScribeInstaller", targets: ["OpenScribeInstaller"]),
     ],
     targets: [
+        .target(
+            name: "OpenScribeObjC",
+            path: "Sources/OpenScribeObjC"
+        ),
         .executableTarget(
             name: "OpenScribe",
+            dependencies: ["OpenScribeObjC"],
             path: "Sources/OpenScribe",
             resources: [.process("Resources")]
         ),

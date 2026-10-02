@@ -2,6 +2,7 @@ import AVFoundation
 import AudioToolbox
 import Combine
 import Foundation
+import OpenScribeObjC
 
 @MainActor
 final class AudioRecorder: ObservableObject {
@@ -46,14 +47,15 @@ final class AudioRecorder: ObservableObject {
         guard granted else { throw RecorderError.microphonePermissionDenied }
 
         preservesFiles = directoryURL != nil
-        let input = engine.inputNode
+        // Device changes can make AVAudioEngine raise Objective-C exceptions; surface them as errors.
+        let input: AVAudioInputNode = try Self.guarded { engine.inputNode }
         do {
             let chosenID = deviceUID.isEmpty ? MicrophoneDevice.defaultDeviceID() : MicrophoneDevice.available().first(where: { $0.id == deviceUID })?.deviceID
             guard var id = chosenID, let unit = input.audioUnit else { throw RecorderError.noInputDevice }
             guard AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                                        &id, UInt32(MemoryLayout.size(ofValue: id))) == noErr else { throw RecorderError.noInputDevice }
         }
-        let format = input.outputFormat(forBus: 0)
+        let format = try Self.guarded { input.outputFormat(forBus: 0) }
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw RecorderError.noInputDevice
         }
@@ -69,14 +71,18 @@ final class AudioRecorder: ObservableObject {
 
         do {
             let state = chunkStore
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, time in
-                state.updateMeter(Self.level(from: buffer))
-                let timestamp = timelineOrigin.map { AVAudioTime.seconds(forHostTime: time.hostTime) - $0 }
-                state.append(buffer, at: timestamp)
-            }
             tapInstalled = true
-            engine.prepare()
-            try engine.start()
+            try Self.guarded {
+                input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, time in
+                    state.updateMeter(Self.level(from: buffer))
+                    let timestamp = timelineOrigin.map { AVAudioTime.seconds(forHostTime: time.hostTime) - $0 }
+                    state.append(buffer, at: timestamp)
+                }
+            }
+            try Self.guarded {
+                engine.prepare()
+                try engine.start()
+            }
         } catch {
             isRecording = false
             chunkStore.cancel()
@@ -84,6 +90,14 @@ final class AudioRecorder: ObservableObject {
             startedAt = nil
             throw error
         }
+    }
+
+    private static func guarded<T>(_ body: () throws -> T) throws -> T {
+        var result: Result<T, Error>?
+        do { try ObjCTry.perform { result = Result { try body() } } }
+        catch { throw RecorderError.audioEngine(error.localizedDescription) }
+        guard let result else { throw RecorderError.noInputDevice }
+        return try result.get()
     }
 
     func stop() throws -> RecordedAudio {
@@ -121,14 +135,12 @@ final class AudioRecorder: ObservableObject {
     }
 
     private func stopEngine() {
-        if engine.isRunning {
-            engine.stop()
+        try? ObjCTry.perform {
+            if self.engine.isRunning { self.engine.stop() }
+            if self.tapInstalled { self.engine.inputNode.removeTap(onBus: 0) }
+            self.engine.reset()
         }
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
-        engine.reset()
+        tapInstalled = false
     }
 
     private func receiveMeterLevel(_ level: Float) {
@@ -189,14 +201,16 @@ enum RecorderError: LocalizedError {
     case notRecording
     case emptyRecording
     case audioWriteFailed
+    case audioEngine(String)
 
     var errorDescription: String? {
         switch self {
         case .microphonePermissionDenied: return "Microphone access is required for dictation."
         case .noInputDevice: return "No microphone input is available."
         case .notRecording: return "There is no active recording."
-        case .emptyRecording: return "The recording did not contain audio."
+        case .emptyRecording: return "Nothing was recorded. Start again and speak for a moment."
         case .audioWriteFailed: return "OpenScribe could not store the recording."
+        case .audioEngine(let reason): return "The microphone could not start. Try again, or choose another microphone in Settings.\n\n\(reason)"
         }
     }
 }

@@ -277,30 +277,30 @@ private struct CalendarPromptView: View {
                 if prompt.kind == .start {
                     Text("Make sure everyone knows you're recording.").font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Button("No", action: calendar.decline)
+                        Button("No", action: calendar.decline).buttonStyle(.flowSecondary)
                         Spacer()
-                        Button("Yes") { calendar.startPrompt() }.buttonStyle(.borderedProminent)
+                        Button("Yes") { calendar.startPrompt() }.buttonStyle(.flowPrimary)
                     }
                 } else {
                     HStack {
-                        Button("Stop & save", action: calendar.finishPrompt)
+                        Button("Stop & save", action: calendar.finishPrompt).buttonStyle(.flowSecondary)
                         Spacer()
-                        Button("15 more minutes", action: calendar.extend).buttonStyle(.borderedProminent)
+                        Button("15 more minutes", action: calendar.extend).buttonStyle(.flowPrimary)
                     }
                 }
-            }.padding(20).frame(width: 390, alignment: .leading)
+            }.padding(20).frame(width: 390, alignment: .leading).tint(FlowTheme.accent)
         } else if let title = calendar.trackedTitle {
             VStack(alignment: .leading, spacing: 14) {
                 Label("Calendar recording", systemImage: "record.circle").font(.headline)
                 Text(title).lineLimit(2)
                 Text("“Not happening” stops capture and further processing.").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Not happening", action: calendar.decline)
-                    Button("Stop & save", action: calendar.finishPrompt)
+                    Button("Not happening", action: calendar.decline).buttonStyle(.flowGhost)
+                    Button("Stop & save", action: calendar.finishPrompt).buttonStyle(.flowSecondary)
                     Spacer()
-                    Button("Hide", action: calendar.hideRecordingControls)
+                    Button("Hide", action: calendar.hideRecordingControls).buttonStyle(.flowGhost)
                 }
-            }.padding(20).frame(width: 390, alignment: .leading)
+            }.padding(20).frame(width: 390, alignment: .leading).tint(FlowTheme.accent)
         }
     }
 }

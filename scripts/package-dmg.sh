@@ -10,7 +10,7 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     print -u2 "No stable code-signing identity found. Set CODESIGN_IDENTITY or install a signing certificate."
     exit 1
 fi
-CONFIG="${CONFIGURATION:-debug}"
+CONFIG="${CONFIGURATION:-release}"
 OUTPUT_DIR="${PACKAGE_OUTPUT_DIR:-$ROOT/dist}"
 APP="$OUTPUT_DIR/OpenScribe.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppInfo.plist")"
@@ -41,23 +41,5 @@ hdiutil create \
     -ov \
     -format UDZO \
     "$DMG" >/dev/null
-
-hdiutil attach -nobrowse "$DMG" >/dev/null
-osascript <<'APPLESCRIPT' || true
-tell application "Finder"
-    tell disk "OpenScribe"
-        open
-        delay 1
-        set current view of container window to icon view
-        set icon size of icon view options of container window to 128
-        set position of item "OpenScribe.app" to {160, 190}
-        set position of item "Applications" to {500, 190}
-        set position of item "OpenScribe Installer.app" to {330, 370}
-        set bounds of container window to {100, 100, 700, 560}
-        close container window
-    end tell
-end tell
-APPLESCRIPT
-hdiutil detach /Volumes/OpenScribe >/dev/null || true
 
 printf '%s\n' "$DMG"

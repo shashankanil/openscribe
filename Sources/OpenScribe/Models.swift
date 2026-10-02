@@ -220,34 +220,44 @@ enum ShortcutFormatter {
 
 
 enum FlowThemeVariant: String, Codable, CaseIterable, Identifiable {
+    case system
     case light
     case dark
-    case whisperFlow
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .system: return "System"
         case .light: return "Light"
         case .dark: return "Dark"
-        case .whisperFlow: return "Whisperlight"
         }
     }
 
-    var detail: String {
+    var symbol: String {
         switch self {
-        case .light: return "A clean, bright workspace."
-        case .dark: return "A low-glare graphite workspace."
-        case .whisperFlow: return "Warm paper, lavender, and mint."
+        case .system: return "circle.lefthalf.filled"
+        case .light: return "sun.max"
+        case .dark: return "moon"
         }
     }
 
-    var appearanceName: NSAppearance.Name {
-        self == .dark ? .darkAqua : .aqua
+    /// `nil` follows the macOS appearance.
+    var appearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+
+    // Retired themes (such as the original paper look) follow the system appearance.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = FlowThemeVariant(rawValue: raw) ?? .system
     }
 }
 
- 
 struct AppSettings: Codable, Equatable {
     var speechProvider: SpeechProvider = .openRouter
     var speechBaseURL: String = SpeechProvider.openRouter.defaultBaseURL
@@ -285,7 +295,7 @@ struct AppSettings: Codable, Equatable {
     var shortcutModifiers: UInt = NSEvent.ModifierFlags.option.rawValue
     var overlayPosition = "bottom-center"
     var dictationMode: DictationMode = .toggle
-    var theme: FlowThemeVariant = .whisperFlow
+    var theme: FlowThemeVariant = .system
 
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
@@ -345,7 +355,7 @@ struct AppSettings: Codable, Equatable {
         interactionSounds = try container.decodeIfPresent(Bool.self, forKey: .interactionSounds) ?? true
         snippets = try container.decodeIfPresent([VoiceSnippet].self, forKey: .snippets) ?? []
         appWritingTones = try container.decodeIfPresent([String: WritingTone].self, forKey: .appWritingTones) ?? [:]
-        theme = try container.decodeIfPresent(FlowThemeVariant.self, forKey: .theme) ?? .whisperFlow
+        theme = try container.decodeIfPresent(FlowThemeVariant.self, forKey: .theme) ?? .system
     }
 }
 
@@ -355,6 +365,8 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     var title: String
     var rawText: String
     var cleanedText: String
+    // An explicit edit may be empty; it must not bring back the original transcript.
+    var editedText: String?
     var duration: TimeInterval
     var isPinned = false
     var tags: [String] = []
@@ -363,7 +375,20 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     var sourceBundleIdentifier: String?
 
     var displayText: String {
-        cleanedText.isEmpty ? rawText : cleanedText
+        editedText ?? (cleanedText.isEmpty ? rawText : cleanedText)
+    }
+
+    var displayTitle: String {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty && name != "Untitled note" { return name }
+        let firstLine = displayText.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let words = firstLine.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return words.isEmpty ? "Untitled note" : String(words.prefix(64))
+    }
+
+    var hasContent: Bool {
+        !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (!title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && title != "Untitled note")
     }
 
     var relativeDate: String {

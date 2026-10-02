@@ -20,22 +20,17 @@ struct CalendarSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Calendar").font(.system(size: 25, weight: .semibold))
-                        Text("Your schedule, with recording on your terms.").font(.system(size: 13)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Recording setup", systemImage: "slider.horizontal.3") { showSetup = true }.controlSize(.small)
+                FlowPageHeader(title: "Calendar", subtitle: "Your schedule, with recording on your terms.") {
+                    Button("Recording setup", systemImage: "slider.horizontal.3") { showSetup = true }.buttonStyle(.flowSecondary)
                 }
                 if !calendar.authorized {
                     VStack(alignment: .leading, spacing: 16) {
-                        Image(systemName: "calendar").font(.system(size: 30)).foregroundStyle(FlowTheme.lavenderDeep)
+                        Image(systemName: "calendar").font(.system(size: 30)).foregroundStyle(FlowTheme.accent)
                         Text("Bring your meetings into view").font(.headline)
                         Text("See calendars already synced to your Mac, including Google. You choose which meetings to record.").foregroundStyle(.secondary)
-                        Button("Allow calendar access") { Task { await calendar.requestAccess() } }.buttonStyle(.borderedProminent)
+                        Button("Allow calendar access") { Task { await calendar.requestAccess() } }.buttonStyle(.flowPrimary)
                         Button("Add a Google account") { addAccount() }.buttonStyle(.link)
-                    }.padding(24).frame(maxWidth: .infinity, alignment: .leading).background(FlowTheme.paper, in: RoundedRectangle(cornerRadius: 14))
+                    }.padding(24).frame(maxWidth: .infinity, alignment: .leading).background(FlowTheme.surface, in: RoundedRectangle(cornerRadius: 14))
                 } else {
                     HStack {
                         Label(app.settings.calendarEnabled && !app.settings.calendarIDs.isEmpty ? "Meeting prompts on" : "Browsing only", systemImage: app.settings.calendarEnabled ? "bell" : "calendar")
@@ -50,7 +45,7 @@ struct CalendarSettingsView: View {
                     agendaView
                 }
                 if let error = calendar.error { Text(error).font(.caption).foregroundStyle(.red) }
-            }.padding(30).frame(maxWidth: 1000).frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 24).frame(maxWidth: 1000).frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear { calendar.showMonth(month) }
         .sheet(isPresented: $showSetup) { setup }
@@ -61,9 +56,9 @@ struct CalendarSettingsView: View {
             HStack {
                 Text(month.formatted(.dateTime.month(.wide).year())).font(.system(size: 18, weight: .semibold))
                 Spacer()
-                Button("Today") { month = Date(); selectedDay = month; calendar.showMonth(month) }.controlSize(.small)
-                Button { moveMonth(-1) } label: { Image(systemName: "chevron.left") }.help("Previous month").accessibilityLabel("Previous month")
-                Button { moveMonth(1) } label: { Image(systemName: "chevron.right") }.help("Next month").accessibilityLabel("Next month")
+                Button("Today") { month = Date(); selectedDay = month; calendar.showMonth(month) }.buttonStyle(.flow(.secondary, size: .small))
+                FlowIconButton(symbol: "chevron.left", help: "Previous month") { moveMonth(-1) }
+                FlowIconButton(symbol: "chevron.right", help: "Next month") { moveMonth(1) }
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 7), spacing: 5) {
                 ForEach(0..<7, id: \.self) { offset in
@@ -78,7 +73,7 @@ struct CalendarSettingsView: View {
                                 HStack {
                                     Text(String(dates.component(.day, from: day))).font(.system(size: 12, weight: dates.isDateInToday(day) ? .bold : .medium))
                                     Spacer()
-                                    if dates.isDateInToday(day) { Circle().fill(FlowTheme.lavenderDeep).frame(width: 5, height: 5) }
+                                    if dates.isDateInToday(day) { Circle().fill(FlowTheme.accent).frame(width: 5, height: 5) }
                                 }
                                 ForEach(events.prefix(2)) { event in
                                     Text(event.title).font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
@@ -86,13 +81,13 @@ struct CalendarSettingsView: View {
                                 if events.count > 2 { Text("+\(events.count - 2) more").font(.system(size: 10)).foregroundStyle(.secondary) }
                                 Spacer(minLength: 0)
                             }.padding(8).frame(maxWidth: .infinity, minHeight: 74, maxHeight: 74, alignment: .topLeading)
-                                .background(dates.isDate(day, inSameDayAs: selectedDay) ? FlowTheme.lavender.opacity(0.5) : FlowTheme.paperMuted.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                                .background(dates.isDate(day, inSameDayAs: selectedDay) ? FlowTheme.accentSoft : FlowTheme.surfaceMuted, in: RoundedRectangle(cornerRadius: 8))
                         }.buttonStyle(.plain)
                             .accessibilityLabel(day.formatted(date: .complete, time: .omitted) + ", \(events.count) events")
                     } else { Color.clear.frame(height: 74) }
                 }
             }
-        }.padding(20).background(FlowTheme.paper, in: RoundedRectangle(cornerRadius: 14))
+        }.flowCard(padding: 20)
     }
 
     private var agendaView: some View {
@@ -107,8 +102,7 @@ struct CalendarSettingsView: View {
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
             }
             ForEach(dayEvents) { event in eventRow(event) }
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
-            .background(FlowTheme.paper, in: RoundedRectangle(cornerRadius: 14))
+        }.frame(maxWidth: .infinity, alignment: .leading).flowCard(padding: 20)
     }
 
     private func eventRow(_ event: CalendarMeeting) -> some View {
@@ -120,7 +114,7 @@ struct CalendarSettingsView: View {
                 Text(event.isAllDay ? "All day" : event.start.formatted(date: .omitted, time: .shortened)).font(.system(size: 12, weight: .semibold))
                 if !event.isAllDay { Text(event.end, style: .time).font(.caption).foregroundStyle(.secondary) }
             }.frame(width: 78, alignment: .leading)
-            RoundedRectangle(cornerRadius: 2).fill(FlowTheme.lavenderDeep).frame(width: 3, height: 42)
+            RoundedRectangle(cornerRadius: 2).fill(FlowTheme.accent).frame(width: 3, height: 42)
             VStack(alignment: .leading, spacing: 5) {
                 Text(event.title).font(.system(size: 13, weight: .semibold))
                 Text(event.calendarName).font(.caption).foregroundStyle(.secondary)
@@ -132,7 +126,7 @@ struct CalendarSettingsView: View {
                 if event.end > Date(), eligible, !excluded {
                     Button(calendar.isSkipped(event) ? "Undo skip" : "Skip recording") {
                         if calendar.isSkipped(event) { calendar.allow(event) } else { calendar.skip(event) }
-                    }.controlSize(.small)
+                    }.buttonStyle(.flow(.secondary, size: .small))
                 }
             }
         }.padding(.vertical, 10)
@@ -162,7 +156,7 @@ struct CalendarSettingsView: View {
                     Divider()
                     Text("Always skip matching titles").font(.headline)
                     HStack {
-                        TextField("For example: personal or 1:1", text: $excludedTitle).textFieldStyle(.roundedBorder)
+                        TextField("For example: personal or 1:1", text: $excludedTitle).flowField()
                         Button("Add") {
                             let value = excludedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                             app.updateSettings { if !$0.calendarExcludedTitles.contains(value) { $0.calendarExcludedTitles.append(value) } }
@@ -175,7 +169,7 @@ struct CalendarSettingsView: View {
                     Text("OpenScribe must be running. Recording uses your microphone and system audio. Calendar timing does not confirm that a call is connected.").font(.caption).foregroundStyle(.secondary)
                 }.padding(.trailing, 8)
             }
-        }.padding(26).frame(width: 540, height: 620).background(FlowTheme.paper)
+        }.padding(26).frame(width: 540, height: 620).background(FlowTheme.background)
     }
 
     private func moveMonth(_ offset: Int) {

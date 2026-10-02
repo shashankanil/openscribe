@@ -88,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppController.shared.boot()
         statusBarController = StatusBarController(controller: .shared)
         if CommandLine.arguments.contains("--show-workspace") { AppController.shared.openMainWindow() }
+        #if DEBUG
+        if CommandLine.arguments.contains("--show-quick-panel") { statusBarController?.showQuickPanel() }
+        #endif
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

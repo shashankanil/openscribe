@@ -6,42 +6,38 @@ final class OverlayPanel: NSPanel {
 
     init(controller: AppController) {
         self.controller = controller
-        super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 104, height: 42),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 112, height: 58),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
+        appearance = NSAppearance(named: .darkAqua)
         hasShadow = false
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         hidesOnDeactivate = false
         contentView = NSHostingView(rootView: OverlayView(controller: controller))
     }
 
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
 
     func placeOnScreen() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let visible = screen.visibleFrame
-        let size = frame.size
         let position = controller?.settings.overlayPosition ?? "bottom-center"
         let x: CGFloat
         switch position {
-        case "bottom-left":
-            x = visible.minX + 24
-        case "bottom-right":
-            x = visible.maxX - size.width - 24
-        default:
-            x = visible.midX - size.width / 2
+        case "bottom-left": x = visible.minX + 24
+        case "bottom-right": x = visible.maxX - frame.width - 24
+        default: x = visible.midX - frame.width / 2
         }
-        setFrameOrigin(NSPoint(x: x, y: visible.minY + 24))
+        setFrameOrigin(NSPoint(x: x, y: visible.minY + 20))
     }
 
     func show() {
+        let phase = controller?.capturePhase ?? .idle
+        let width: CGFloat = phase == .recording ? 264 : phase == .transcribing || phase == .cleaning ? 232 : phase == .ready ? 164 : 112
+        setContentSize(NSSize(width: width, height: 58))
         placeOnScreen()
         orderFrontRegardless()
     }
@@ -51,89 +47,63 @@ struct OverlayView: View {
     @ObservedObject var controller: AppController
     @ObservedObject private var recorder: AudioRecorder
 
-    private let ink = Color(red: 0.10, green: 0.10, blue: 0.10)
-    private let paper = Color(red: 1.0, green: 1.0, blue: 0.92)
-
     init(controller: AppController) {
         self.controller = controller
-        _recorder = ObservedObject(wrappedValue: controller.recorder)
+        recorder = controller.recorder
     }
 
+    private var phase: CapturePhase { controller.capturePhase }
+    private var processing: Bool { phase == .transcribing || phase == .cleaning }
+
     var body: some View {
-        let isProcessing = controller.capturePhase == .transcribing || controller.capturePhase == .cleaning
-        TimelineView(.animation(minimumInterval: 0.08, paused: !isProcessing)) { context in
-            Flowbar(
-                phase: controller.capturePhase,
-                hint: controller.captureHint,
-                inputLevels: recorder.inputLevels,
-                loadingTime: context.date.timeIntervalSinceReferenceDate,
-                ink: ink,
-                paper: paper
-            )
+        HStack(spacing: 10) {
+            if phase == .recording {
+                Circle().fill(FlowTheme.recording).frame(width: 7, height: 7)
+                FlowWaveform(levels: recorder.inputLevels, color: .white, barWidth: 2, spacing: 2, maxHeight: 22)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(FlowFormat.duration(context.date.timeIntervalSince(controller.captureStartedAt ?? context.date)))
+                        .font(.system(size: 12, weight: .medium)).monospacedDigit().foregroundStyle(.white.opacity(0.8))
+                }
+                Spacer(minLength: 0)
+                overlayButton("stop.fill", label: "Stop and save", color: FlowTheme.recording) { controller.finishCapture() }
+                overlayButton("xmark", label: "Cancel recording") { controller.cancelCapture() }
+            } else if processing {
+                FlowWaveform(levels: Array(repeating: 0.2, count: 7), color: FlowTheme.accent, barWidth: 2, spacing: 2, maxHeight: 22, animated: true)
+                Text(phase == .cleaning ? "Polishing…" : "Transcribing…").font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85))
+                Spacer(minLength: 0)
+                overlayButton("xmark", label: "Cancel processing") { controller.cancelCapture() }
+            } else if phase == .ready {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(FlowTheme.success)
+                Text("Saved to Notes").font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+            } else {
+                Button { controller.toggleCaptureFromQuickPanel() } label: {
+                    FlowWaveform(levels: Array(repeating: 0.14, count: 11), color: .white.opacity(0.55), maxHeight: 22)
+                        .frame(maxWidth: .infinity).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Start dictation")
+            }
         }
-        .frame(width: 104, height: 42)
+        .padding(.horizontal, 14).frame(height: 40)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
+        .padding(.horizontal, 7).padding(.vertical, 9)
+        .environment(\.colorScheme, .dark)
+        .help(controller.captureHint)
         .contextMenu {
-            Button("Open workspace") { controller.openWorkspace() }
-            Button("Open settings") { controller.openSettings() }
-            if controller.capturePhase == .recording {
+            Button("Open Notes") { controller.openWorkspace() }
+            Button("Settings…") { controller.openSettings() }
+            if phase == .recording {
                 Divider()
+                Button("Stop & save") { controller.finishCapture() }
                 Button("Cancel recording", role: .destructive) { controller.cancelCapture() }
             }
         }
     }
-}
 
-private struct Flowbar: View {
-    let phase: CapturePhase
-    let hint: String
-    let inputLevels: [Float]
-    let loadingTime: TimeInterval
-    let ink: Color
-    let paper: Color
-
-    private var accent: Color {
-        switch phase {
-        case .failed:
-            return Color(red: 1.0, green: 0.48, blue: 0.52)
-        case .transcribing, .cleaning:
-            return Color(red: 0.88, green: 0.80, blue: 1.0)
-        default:
-            return paper
-        }
-    }
-
-    var body: some View {
-        waveform
-            .frame(width: 90, height: 28)
-            .padding(.horizontal, 4)
-            .frame(width: 104, height: 38)
-            .background(ink, in: Capsule())
-            .overlay(Capsule().stroke(Color(red: 0.30, green: 0.29, blue: 0.26), lineWidth: 1))
-            .shadow(color: .black.opacity(0.20), radius: 10, y: 5)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(hint)
-    }
-
-    private var waveform: some View {
-        HStack(alignment: .center, spacing: 3) {
-            ForEach(0..<11, id: \.self) { index in
-                let level = inputLevels.indices.contains(index) ? inputLevels[index] : 0.04
-                let loadingPulse = Float(
-                    0.04 + abs(sin(loadingTime * 3.4 + Double(index) * 0.55)) * 0.08
-                )
-                let renderedLevel = phase == .transcribing || phase == .cleaning
-                    ? loadingPulse
-                    : max(0.04, level)
-                Capsule()
-                    .fill(accent)
-                    .frame(width: 2.6, height: 4 + CGFloat(renderedLevel) * 20)
-                    .opacity(
-                        phase == .transcribing || phase == .cleaning
-                            ? 0.72 + 0.18 * abs(sin(loadingTime * 3.4 + Double(index) * 0.55))
-                            : 1
-                    )
-                    .animation(.easeOut(duration: 0.08), value: renderedLevel)
-            }
-        }
+    private func overlayButton(_ symbol: String, label: String, color: Color = .white.opacity(0.6), action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).foregroundStyle(color)
+                .frame(width: 24, height: 24).background(.white.opacity(0.08), in: Circle()).contentShape(Circle())
+        }.buttonStyle(.plain).help(label).accessibilityLabel(label)
     }
 }

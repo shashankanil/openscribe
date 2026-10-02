@@ -83,6 +83,35 @@ struct MeetingRecord: Codable, Identifiable {
     }
 }
 
+
+extension MeetingRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id, title, createdAt, duration, status, summarizeOnStop, liveTranscription
+        case includesMicrophone, includesSystemAudio, settings, segments, summary
+        case recoveryNotice, lastError, microphoneLabel, systemLabel
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        settings = try values.decode(AppSettings.self, forKey: .settings)
+        duration = try values.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        status = try values.decodeIfPresent(MeetingStatus.self, forKey: .status) ?? .saved
+        summarizeOnStop = try values.decodeIfPresent(Bool.self, forKey: .summarizeOnStop) ?? true
+        liveTranscription = try values.decodeIfPresent(Bool.self, forKey: .liveTranscription)
+        includesMicrophone = try values.decodeIfPresent(Bool.self, forKey: .includesMicrophone) ?? true
+        includesSystemAudio = try values.decodeIfPresent(Bool.self, forKey: .includesSystemAudio) ?? true
+        segments = try values.decodeIfPresent([MeetingSegment].self, forKey: .segments) ?? []
+        summary = try values.decodeIfPresent(MeetingSummary.self, forKey: .summary)
+        recoveryNotice = try values.decodeIfPresent(String.self, forKey: .recoveryNotice)
+        lastError = try values.decodeIfPresent(String.self, forKey: .lastError)
+        microphoneLabel = try values.decodeIfPresent(String.self, forKey: .microphoneLabel) ?? "Microphone"
+        systemLabel = try values.decodeIfPresent(String.self, forKey: .systemLabel) ?? "System audio"
+    }
+}
+
 enum MeetingError: LocalizedError {
     case noSource, noAudio, invalidSummary, unavailableDisplay
     var errorDescription: String? {
