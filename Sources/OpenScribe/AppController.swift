@@ -150,24 +150,24 @@ final class AppController: ObservableObject {
     }
 
     private var pasteLastTask: Task<Void, Never>?
-    var canPasteLast: Bool { !notes.isEmpty && !isDictationBusy && pasteLastTask == nil }
+    var canPasteLast: Bool { !(store.latestText ?? "").isEmpty && !isDictationBusy && pasteLastTask == nil }
 
     func pasteLastDictation() {
-        guard canPasteLast, let note = notes.first,
+        guard canPasteLast, let text = store.latestText,
               let target = activeApplicationMetadata().bundleIdentifier else { return }
         pasteLastTask = Task { @MainActor in
             defer { pasteLastTask = nil; objectWillChange.send() }
-            do { try await TextInjector.paste(note.displayText, into: target) }
+            do { try await TextInjector.paste(text, into: target) }
             catch { lastError = error.localizedDescription; showTransientError("Paste failed · transcript is still saved") }
         }
     }
 
     func pasteLastFromQuickPanel() {
         guard canPasteLast, let target = lastExternalApplication, !target.isTerminated,
-              let bundleID = target.bundleIdentifier, let note = notes.first else { return }
+              let bundleID = target.bundleIdentifier, let text = store.latestText else { return }
         pasteLastTask = Task { @MainActor in
             defer { pasteLastTask = nil; objectWillChange.send() }
-            do { try await TextInjector.paste(note.displayText, into: bundleID) }
+            do { try await TextInjector.paste(text, into: bundleID) }
             catch { showTransientError("Paste failed · transcript is still saved.\n\n\(error.localizedDescription)") }
         }
     }
@@ -754,8 +754,9 @@ final class AppController: ObservableObject {
 
                 try Task.checkCancellation()
                 guard captureGeneration == generation else { return }
-                let note = store.addNote(
-                    id: job?.id ?? UUID(),
+                let captureID = job?.id ?? UUID()
+                store.addNote(
+                    id: captureID,
                     createdAt: job?.createdAt ?? Date(),
                     rawText: raw,
                     cleanedText: cleaned,
@@ -763,11 +764,11 @@ final class AppController: ObservableObject {
                     sourceApplication: sourceApplication,
                     sourceBundleIdentifier: sourceBundleIdentifier
                 )
-                guard store.hasPersistedNote(note.id) else {
+                guard store.hasPersistedNote(captureID) else {
                     throw ProviderClient.ClientError.provider(message: "The transcript could not be saved. Your audio is retained for recovery.")
                 }
                 if let job { try recovery.remove(job.id) }
-                currentTranscript = note.displayText
+                currentTranscript = cleaned
                 capturePhase = .ready
                 captureHint = "Saved to notes"
                 showOverlay()
@@ -778,7 +779,7 @@ final class AppController: ObservableObject {
 
                 if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible && sourceBundleIdentifier != nil {
                     do {
-                        try await TextInjector.paste(note.displayText, into: sourceBundleIdentifier)
+                        try await TextInjector.paste(cleaned, into: sourceBundleIdentifier)
                     } catch {
                         guard captureGeneration == generation, !Task.isCancelled else { return }
                         permissions.refresh()

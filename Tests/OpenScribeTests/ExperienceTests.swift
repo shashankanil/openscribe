@@ -62,23 +62,28 @@ final class ExperienceRenderingTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let controller = AppController(rootURL: root)
         var firstNote = controller.store.addNote(rawText: "Um let’s give people a clear next step when a recording needs attention.", cleanedText: "Let’s give people a clear next step when a recording needs attention.", duration: 12, sourceApplication: "Mail")
-        firstNote.title = "A clearer first run"
         firstNote.isPinned = true
         controller.store.updateNote(firstNote)
         controller.store.addNote(rawText: "Pick up oat milk, coffee, and a notebook on the way home.", cleanedText: "Pick up oat milk, coffee, and a notebook on the way home.", duration: 8, sourceApplication: "Notes")
+        controller.store.addNote(createdAt: Calendar.current.date(byAdding: .day, value: -1, to: Date())!, rawText: "Make room for writing in the morning.", cleanedText: "Make room for writing in the morning.", duration: 5, sourceApplication: "Safari")
+        var manual = controller.store.addManualNote()
+        manual.title = "Weekend plans"
+        manual.editedText = "A long walk, good coffee, and time to read."
+        controller.store.updateNote(manual)
         for (name, scheme, appearance) in [("light", ColorScheme.light, NSAppearance.Name.aqua), ("dark", .dark, .darkAqua)] {
             controller.workspaceSection = .notes
             try render(MainWorkspaceView(controller: controller), name: "workspace-\(name)", scheme: scheme, appearance: appearance, width: 1080, height: 720)
             try render(MainWorkspaceView(controller: controller), name: "workspace-compact-\(name)", scheme: scheme, appearance: appearance, width: 900, height: 620)
             try render(ProviderConnectionEditor(controller: controller, purpose: .speech, onClose: {}), name: "connection-\(name)", scheme: scheme, appearance: appearance, width: 675, height: 552)
-            for section in [WorkspaceSection.general, .speech, .cleanup, .personalize, .privacy, .permissions] {
+            for section in WorkspaceSection.settings {
                 controller.workspaceSection = section
                 try render(SettingsView(controller: controller, section: section), name: "\(section.rawValue)-\(name)", scheme: scheme, appearance: appearance, width: 672, height: 620)
             }
             try render(OnboardingView(controller: controller), name: "setup-\(name)", scheme: scheme, appearance: appearance, width: 900, height: 620)
             try render(QuickPanelView(controller: controller, close: {}), name: "quick-panel-\(name)", scheme: scheme, appearance: appearance, width: 340, height: 500)
         }
-        XCTAssertEqual(controller.notes.count, 2)
+        XCTAssertEqual(controller.notes.count, 3)
+        XCTAssertEqual(controller.notes.filter(\.isDailyNote).count, 2)
         XCTAssertTrue(controller.meetings.meetings.isEmpty)
     }
 

@@ -40,6 +40,7 @@ final class AppStore: ObservableObject {
         if !FileManager.default.fileExists(atPath: notesURL.path) {
             persistNotes()
         }
+        groupExistingDictations()
     }
 
     func updateSpeechProvider(_ provider: SpeechProvider) {
@@ -74,12 +75,16 @@ final class AppStore: ObservableObject {
         sourceApplication: String? = nil,
         sourceBundleIdentifier: String? = nil
     ) -> VoiceNote {
+        // Recovery retries refer to a capture ID, even after it joins a daily note.
+        if let saved = notes.first(where: { $0.id == id || $0.captures?.contains(where: { $0.id == id }) == true }) {
+            persistNotes()
+            return saved
+        }
         let text = cleanedText.isEmpty ? rawText : cleanedText
         let title = Self.makeTitle(from: text)
-        let existing = notes.first { $0.id == id }
         var note = VoiceNote(
             id: id,
-            createdAt: existing?.createdAt ?? createdAt,
+            createdAt: createdAt,
             title: title,
             rawText: rawText,
             cleanedText: cleanedText,
@@ -88,10 +93,19 @@ final class AppStore: ObservableObject {
             sourceApplication: sourceApplication,
             sourceBundleIdentifier: sourceBundleIdentifier
         )
-        note.isPinned = existing?.isPinned ?? false
-        note.tags = existing?.tags ?? []
-        if let index = notes.firstIndex(where: { $0.id == id }) { notes[index] = note }
-        else { notes.insert(note, at: 0) }
+        var updated = notes
+        if source == "Dictation" {
+            let capture = note.asCapture
+            if let index = notes.firstIndex(where: { $0.isDailyNote && Calendar.current.isDate($0.createdAt, inSameDayAs: createdAt) }) {
+                note = notes[index]
+                note.appendCaptures([capture])
+                updated.remove(at: index)
+            } else {
+                note.title = createdAt.formatted(.dateTime.month(.wide).day().year())
+                note.captures = [capture]
+            }
+        }
+        notes = (updated + [note]).sorted { $0.lastCapturedAt > $1.lastCapturedAt }
         return note
     }
 
@@ -103,7 +117,7 @@ final class AppStore: ObservableObject {
     @discardableResult
     func updateNote(_ note: VoiceNote) -> Bool {
         if let index = notes.firstIndex(where: { $0.id == note.id }) {
-            notes[index] = note
+            notes[index] = note.mergingNewCaptures(from: notes[index])
         } else {
             guard note.source == "Note", note.hasContent else { return false }
             notes.insert(note, at: 0)
@@ -131,7 +145,40 @@ final class AppStore: ObservableObject {
     }
 
     func hasPersistedNote(_ id: UUID) -> Bool {
-        Self.read([VoiceNote].self, from: notesURL)?.contains { $0.id == id } ?? false
+        Self.read([VoiceNote].self, from: notesURL)?.contains {
+            $0.id == id || $0.captures?.contains(where: { $0.id == id }) == true
+        } ?? false
+    }
+
+    var latestText: String? { notes.max { $0.lastCapturedAt < $1.lastCapturedAt }?.latestText }
+
+    private func groupExistingDictations() {
+        guard notes.contains(where: { $0.source == "Dictation" && !$0.isDailyNote }), !blockedFiles.contains(notesURL) else { return }
+        // Keep the exact pre-migration history, including custom titles and edited transcripts.
+        let backup = rootURL.appendingPathComponent("notes-before-daily-grouping-\(UUID()).json")
+        do { try FileManager.default.copyItem(at: notesURL, to: backup) }
+        catch {
+            blockedFiles.insert(notesURL)
+            loadNotices.append("Could not back up note history before daily grouping. Saving is blocked to protect the original data.\n\n\(error.localizedDescription)")
+            refreshStorageError()
+            return
+        }
+        var grouped = notes.filter { $0.source != "Dictation" || $0.isDailyNote }
+        for original in notes.filter({ $0.source == "Dictation" && !$0.isDailyNote }).sorted(by: { $0.createdAt < $1.createdAt }) {
+            if let index = grouped.firstIndex(where: { $0.isDailyNote && Calendar.current.isDate($0.createdAt, inSameDayAs: original.createdAt) }) {
+                grouped[index].appendCaptures([original.asCapture])
+                grouped[index].isPinned = grouped[index].isPinned || original.isPinned
+                grouped[index].tags = Array(Set(grouped[index].tags + original.tags)).sorted()
+            } else {
+                var daily = original
+                daily.title = original.createdAt.formatted(.dateTime.month(.wide).day().year())
+                daily.cleanedText = original.displayText
+                daily.editedText = original.editedText
+                daily.captures = [original.asCapture]
+                grouped.append(daily)
+            }
+        }
+        notes = grouped.sorted { $0.lastCapturedAt > $1.lastCapturedAt }
     }
 
     func flush() {

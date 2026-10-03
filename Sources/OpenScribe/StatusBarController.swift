@@ -104,7 +104,6 @@ final class StatusBarController: NSObject {
 
     func showQuickPanel() {
         guard let button = item.button else { return }
-        NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
@@ -113,7 +112,7 @@ final class StatusBarController: NSObject {
         item.target = self
         return item
     }
-    @objc private func openWorkspace() { controller.openMainWindow() }
+    @objc private func openWorkspace() { controller.openWorkspace() }
     @objc private func openMeetings() { controller.workspaceSection = .meetings; controller.openMainWindow() }
     @objc private func openSettings() { controller.openSettings() }
     @objc private func toggleCapture() { controller.toggleCapture() }
@@ -151,7 +150,7 @@ struct QuickPanelView: View {
                         .font(.system(size: 11)).foregroundStyle(FlowTheme.inkMuted)
                 }
                 Spacer()
-                FlowIconButton(symbol: "arrow.up.forward.app", help: "Open workspace") { close(); controller.openMainWindow() }
+                FlowIconButton(symbol: "house", help: "Home — open Notes") { close(); controller.openWorkspace() }
                 FlowIconButton(symbol: "gearshape", help: "Settings") { close(); controller.openSettings() }
             }
             if controller.meetings.occupiesCapture {
@@ -200,19 +199,22 @@ struct QuickPanelView: View {
                 VStack(spacing: 2) {
                     ForEach(controller.notes.prefix(3)) { note in
                         Button {
-                            FlowFormat.copy(note.displayText)
+                            FlowFormat.copy(note.latestText)
                             copiedID = note.id
                         } label: {
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(note.displayText.isEmpty ? note.title : note.displayText).font(.system(size: 12.5)).lineLimit(2).multilineTextAlignment(.leading)
-                                    Text(note.createdAt, style: .relative).font(.system(size: 10.5)).foregroundStyle(FlowTheme.inkFaint)
+                                    Text(note.latestText.isEmpty ? note.displayTitle : note.latestText).font(.system(size: 12.5)).lineLimit(2).multilineTextAlignment(.leading)
+                                    HStack(spacing: 4) {
+                                        Text(note.lastCapturedAt, style: .relative)
+                                        if note.isDailyNote { Text("·"); Text(note.captureCountLabel) }
+                                    }.font(.system(size: 10.5)).foregroundStyle(FlowTheme.inkFaint)
                                 }
                                 Spacer(minLength: 0)
                                 Image(systemName: copiedID == note.id ? "checkmark" : "doc.on.doc")
                                     .foregroundStyle(copiedID == note.id ? FlowTheme.success : FlowTheme.inkFaint)
                             }.padding(8).contentShape(Rectangle()).flowHoverHighlight(radius: 8)
-                        }.buttonStyle(.plain).help("Copy note")
+                        }.buttonStyle(.plain).help(note.isDailyNote ? "Copy latest capture" : "Copy note")
                     }
                 }
             }

@@ -14,8 +14,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 32).padding(.top, 28).padding(.bottom, 6)
             Group {
                 switch section {
-                case .speech: speechTab
-                case .cleanup: languageModelTab
+                case .connections: connectionsTab
                 case .personalize: shortcutsTab
                 case .privacy: privacyTab
                 case .permissions: PermissionsView(controller: controller)
@@ -129,16 +128,22 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Speech to Text
+    // MARK: - API & Models
 
-    private var speechTab: some View {
+    private var connectionsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 VStack(alignment: .leading, spacing: 10) {
-                    sectionLabel("Provider")
+                    sectionLabel("Transcription")
                     ProviderConnectionCard(controller: controller, purpose: .speech)
                 }
-                FlowSettingsGroup(title: "While you speak") {
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("Writing & summaries")
+                    ProviderConnectionCard(controller: controller, purpose: .languageModel)
+                }
+                Text("Each connection has its own model. When both use the same service, you can reuse your saved API key in connection setup.")
+                    .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
+                FlowSettingsGroup(title: "Transcription behavior") {
                     FlowSettingsRow(title: "Live transcription", detail: "Start transcribing before the recording ends.", symbol: "waveform") {
                         Toggle("Live transcription", isOn: settingBinding(\.dictationLiveTranscription)).labelsHidden().toggleStyle(.switch)
                     }
@@ -149,53 +154,46 @@ struct SettingsView: View {
                          controller.settings.automaticStreaming && StreamingCapability.resolve(controller.settings) != nil
                          ? "Your current model supports streaming." : "Audio is transcribed in 15-second sections.")
                 }.font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                writingBehavior
             }.frame(maxWidth: 760).padding(.horizontal, 32).padding(.vertical, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private var languageModelTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                VStack(alignment: .leading, spacing: 10) {
-                    sectionLabel("Provider")
-                    ProviderConnectionCard(controller: controller, purpose: .languageModel)
+    private var writingBehavior: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            FlowSettingsGroup(title: "Writing cleanup") {
+                FlowSettingsRow(title: "Polish my transcripts", detail: "Clean up speech before it becomes a note.", symbol: "text.badge.checkmark") {
+                    Toggle("Polish my transcripts", isOn: settingBinding(\.cleanupEnabled)).labelsHidden().toggleStyle(.switch)
                 }
-                FlowSettingsGroup(title: "Writing cleanup") {
-                    FlowSettingsRow(title: "Polish my transcripts", detail: "Clean up speech before it becomes a note.", symbol: "text.badge.checkmark") {
-                        Toggle("Polish my transcripts", isOn: settingBinding(\.cleanupEnabled)).labelsHidden().toggleStyle(.switch)
+                FlowRowDivider()
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Cleanup strength").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Picker("Cleanup strength", selection: settingBinding(\.cleanupStrength)) {
+                            ForEach(CleanupStrength.allCases) { Text($0.title).tag($0) }
+                        }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 290)
                     }
-                    FlowRowDivider()
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Cleanup strength").font(.system(size: 13, weight: .medium))
-                            Spacer()
-                            Picker("Cleanup strength", selection: settingBinding(\.cleanupStrength)) {
-                                ForEach(CleanupStrength.allCases) { Text($0.title).tag($0) }
-                            }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 290)
-                        }
-                        Text(controller.settings.cleanupStrength.instruction).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-                    }.padding(16).disabled(!controller.settings.cleanupEnabled)
-                    FlowRowDivider()
-                    FlowSettingsRow(title: "Default tone", detail: "Override this for individual apps in Personalization.") {
-                        Picker("Default tone", selection: settingBinding(\.writingTone)) {
-                            ForEach(WritingTone.allCases) { Text($0.title).tag($0) }
-                        }.labelsHidden().frame(width: 170)
-                    }.disabled(!controller.settings.cleanupEnabled)
-                }
-                if controller.settings.cleanupEnabled && controller.credential(for: .languageModel).isEmpty {
-                    Label("Add a writing key to enable cleanup and meeting summaries.", systemImage: "key")
-                        .font(.system(size: 12)).foregroundStyle(FlowTheme.warning)
-                }
-            }.frame(maxWidth: 760).padding(.horizontal, 32).padding(.vertical, 24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(controller.settings.cleanupStrength.instruction).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                }.padding(16).disabled(!controller.settings.cleanupEnabled)
+                FlowRowDivider()
+                FlowSettingsRow(title: "Default tone", detail: "Override this for individual apps in Personalization.") {
+                    Picker("Default tone", selection: settingBinding(\.writingTone)) {
+                        ForEach(WritingTone.allCases) { Text($0.title).tag($0) }
+                    }.labelsHidden().frame(width: 170)
+                }.disabled(!controller.settings.cleanupEnabled)
+            }
+            if controller.settings.cleanupEnabled && controller.credential(for: .languageModel).isEmpty {
+                Label("Add a writing key to enable cleanup and meeting summaries.", systemImage: "key")
+                    .font(.system(size: 12)).foregroundStyle(FlowTheme.warning)
+            }
         }
     }
 
     private var sectionSubtitle: String {
         switch section {
-        case .speech: return "Your voice, turned into text."
-        case .cleanup: return "Make every transcript read the way you write."
+        case .connections: return "Manage your providers, API keys, and models in one place."
         case .personalize: return "Your vocabulary, shortcuts, and app preferences."
         case .privacy: return "Choose what stays on this Mac."
         case .permissions: return "Manage the access OpenScribe needs."
@@ -230,12 +228,12 @@ struct SettingsView: View {
                 }
                 FlowSettingsGroup(title: "Your providers") {
                     FlowSettingsRow(title: "Transcription", detail: "Recordings are sent to \(controller.settings.speechProvider.title).", symbol: "mic") {
-                        Button("Manage") { controller.workspaceSection = .speech }.buttonStyle(.flowSecondary)
+                        Button("Manage") { controller.workspaceSection = .connections }.buttonStyle(.flowSecondary)
                     }
                     FlowRowDivider()
                     FlowSettingsRow(title: "Writing", detail: controller.settings.cleanupEnabled
                         ? "Cleanup uses \(controller.settings.languageModelProvider.title)." : "Transcript cleanup is off.", symbol: "text.badge.checkmark") {
-                        Button("Manage") { controller.workspaceSection = .cleanup }.buttonStyle(.flowSecondary)
+                        Button("Manage") { controller.workspaceSection = .connections }.buttonStyle(.flowSecondary)
                     }
                 }
                 Text("Failed or interrupted dictations keep their audio until you retry or discard them. Meeting audio stays with each meeting until you delete it.")

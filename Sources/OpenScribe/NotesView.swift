@@ -25,7 +25,8 @@ struct NotesView: View {
             (filter == .all || $0.isPinned) && (query.isEmpty
                 || $0.displayTitle.localizedCaseInsensitiveContains(query)
                 || $0.displayText.localizedCaseInsensitiveContains(query)
-                || $0.sourceLabel.localizedCaseInsensitiveContains(query))
+                || $0.sourceLabel.localizedCaseInsensitiveContains(query)
+                || ($0.captures?.contains { $0.title.localizedCaseInsensitiveContains(query) || $0.text.localizedCaseInsensitiveContains(query) } ?? false))
         }
         return notes.filter(\.isPinned) + notes.filter { !$0.isPinned }
     }
@@ -196,7 +197,7 @@ private struct NoteListRow: View {
                 Text(note.displayText.isEmpty ? "Start writing…" : note.displayText)
                     .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted).lineSpacing(2).lineLimit(2)
                 HStack(spacing: 5) {
-                    Text(note.createdAt.formatted(date: .omitted, time: .shortened))
+                    Text(note.isDailyNote ? note.captureCountLabel : note.createdAt.formatted(date: .omitted, time: .shortened))
                     Text("·")
                     Image(systemName: note.duration > 0 ? "waveform" : "square.and.pencil").font(.system(size: 9))
                     Text(note.sourceLabel).lineLimit(1)
@@ -221,6 +222,7 @@ struct NoteEditorView: View {
     @State private var lastSaved: VoiceNote?
     @State private var showOriginal = false
     @State private var showCorrection = false
+    @State private var showActivity = false
     @State private var showDelete = false
     @State private var deleted = false
     @State private var saveFailed = false
@@ -245,20 +247,26 @@ struct NoteEditorView: View {
     private var bodyText: Binding<String> {
         Binding(get: { note.displayText }, set: { note.editedText = $0 })
     }
+    private var timeRange: String {
+        let start = note.createdAt.formatted(date: .omitted, time: .shortened)
+        let end = note.lastCapturedAt.formatted(date: .omitted, time: .shortened)
+        return start == end ? start : "\(start) – \(end)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Rectangle().fill(FlowTheme.line).frame(height: 1)
             VStack(alignment: .leading, spacing: 0) {
-                Text(note.createdAt.formatted(.dateTime.month(.wide).day().year().hour().minute()))
+                Text(note.isDailyNote ? note.createdAt.formatted(.dateTime.weekday(.wide).month(.wide).day().year())
+                     : note.createdAt.formatted(.dateTime.month(.wide).day().year().hour().minute()))
                     .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).padding(.bottom, 15)
                 TextField("Untitled note", text: $note.title, axis: .vertical)
                     .textFieldStyle(.plain).font(.system(size: 28, weight: .semibold)).tracking(-0.7)
                     .lineLimit(1...3).accessibilityLabel("Note title").padding(.bottom, 12)
                 HStack(spacing: 7) {
                     Image(systemName: note.duration > 0 ? "waveform" : "square.and.pencil")
-                    Text(note.sourceLabel)
+                    Text(note.isDailyNote ? note.captureCountLabel : note.sourceLabel).fixedSize(horizontal: note.isDailyNote, vertical: false)
                     if note.duration > 0 { Text("·"); Text(FlowFormat.duration(note.duration)).monospacedDigit() }
                     Spacer()
                     if hasOriginal || showOriginal {
@@ -266,7 +274,19 @@ struct NoteEditorView: View {
                             Text("Note").tag(false); Text("Original").tag(true)
                         }.pickerStyle(.segmented).labelsHidden().frame(width: 145)
                     }
-                }.font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).padding(.bottom, 24)
+                }.font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).padding(.bottom, note.isDailyNote ? 10 : 24)
+                if note.isDailyNote {
+                    HStack(spacing: 12) {
+                        Text("\(timeRange) · \(note.sourceLabel)")
+                            .font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint).lineLimit(2)
+                        Spacer(minLength: 0)
+                        Button { showActivity = true } label: {
+                            Label("Activity", systemImage: "clock")
+                        }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(FlowTheme.accent).fixedSize()
+                            .help("Capture times, source apps, and original transcripts")
+                            .popover(isPresented: $showActivity, arrowEdge: .bottom) { captureActivity }
+                    }.padding(.bottom, 20)
+                }
                 if showOriginal {
                     ScrollView {
                         Text(note.rawText).font(.system(size: 15)).lineSpacing(7).textSelection(.enabled)
@@ -297,9 +317,7 @@ struct NoteEditorView: View {
         .onChange(of: controller.workspaceSection) { _, section in
             if section != .notes { persist(); editorFocused = false }
         }
-        .onChange(of: controller.store.note(withID: note.id)?.isPinned) { _, pinned in
-            if let pinned, pinned != note.isPinned { note.isPinned = pinned; lastSaved?.isPinned = pinned }
-        }
+        .onChange(of: controller.store.note(withID: note.id)) { _, stored in synchronize(stored) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in persist() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in persist() }
         .task {
@@ -319,7 +337,7 @@ struct NoteEditorView: View {
     private var toolbar: some View {
         HStack(spacing: 8) {
             Image(systemName: note.duration > 0 ? "waveform" : "doc.text").font(.system(size: 13)).foregroundStyle(FlowTheme.inkFaint)
-            Text(note.duration > 0 ? "Dictation" : "Note").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.inkMuted)
+            Text(note.isDailyNote ? "Daily note" : note.duration > 0 ? "Dictation" : "Note").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.inkMuted)
             Spacer()
             if saveFailed {
                 Button("Retry saving") { persist() }.buttonStyle(.flow(.ghost, size: .small))
@@ -339,6 +357,49 @@ struct NoteEditorView: View {
             } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Note actions")
         }.padding(.horizontal, 20).frame(height: 68)
+    }
+
+    private var captureActivity: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Capture activity").font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Text(note.captureCountLabel).font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint)
+            }
+            Text("Each dictation joins this daily note. Original transcripts and source details stay here.")
+                .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(note.captures ?? []) { capture in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 6) {
+                                Text(capture.createdAt.formatted(date: .omitted, time: .shortened))
+                                    .fontWeight(.semibold).foregroundStyle(FlowTheme.ink)
+                                Text("· \(FlowFormat.duration(capture.duration)) · \(capture.sourceLabel)").lineLimit(1)
+                                Spacer(minLength: 0)
+                                FlowIconButton(symbol: "doc.on.doc", help: "Copy this capture", size: 24) { FlowFormat.copy(capture.text) }
+                            }.font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint)
+                            if !capture.title.isEmpty {
+                                Text(capture.title).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                            }
+                            Text(capture.rawText).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Divider()
+                    }
+                }
+            }.frame(maxHeight: 320)
+        }.padding(20).frame(width: 410).background(FlowTheme.background).foregroundStyle(FlowTheme.ink)
+    }
+
+    private func synchronize(_ stored: VoiceNote?) {
+        guard let stored, stored != lastSaved else { return }
+        if note == lastSaved { note = stored }
+        else {
+            note = note.mergingNewCaptures(from: stored)
+            if note.isPinned == lastSaved?.isPinned { note.isPinned = stored.isPinned }
+        }
+        lastSaved = stored
     }
 
     private var correctionEditor: some View {
@@ -383,7 +444,10 @@ struct NoteEditorView: View {
         guard !deleted, note != lastSaved, lastSaved != nil || note.hasContent else { return }
         guard lastSaved == nil || controller.store.note(withID: note.id) != nil else { return }
         saveFailed = !controller.updateNote(note)
-        if !saveFailed { lastSaved = note }
+        if !saveFailed, let saved = controller.store.note(withID: note.id) {
+            note = saved
+            lastSaved = saved
+        }
     }
     private func exportNote() {
         persist()

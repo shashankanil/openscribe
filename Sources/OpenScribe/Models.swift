@@ -359,6 +359,21 @@ struct AppSettings: Codable, Equatable {
     }
 }
 
+struct NoteCapture: Identifiable, Codable, Hashable {
+    var id: UUID
+    var createdAt: Date
+    var title: String
+    var rawText: String
+    var text: String
+    var duration: TimeInterval
+    var sourceApplication: String?
+    var sourceBundleIdentifier: String?
+
+    var sourceLabel: String {
+        sourceApplication.flatMap { $0.isEmpty ? nil : $0 } ?? "Active app unavailable"
+    }
+}
+
 struct VoiceNote: Identifiable, Codable, Hashable {
     var id = UUID()
     var createdAt = Date()
@@ -373,6 +388,55 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     var source = "Dictation"
     var sourceApplication: String?
     var sourceBundleIdentifier: String?
+    // Optional so older notes keep decoding without a storage format reset.
+    var captures: [NoteCapture]?
+
+    var isDailyNote: Bool { captures != nil }
+    var lastCapturedAt: Date { captures?.last?.createdAt ?? createdAt }
+    var latestText: String { captures?.last?.text ?? displayText }
+    var captureCountLabel: String {
+        let count = captures?.count ?? 1
+        return "\(count) \(count == 1 ? "capture" : "captures")"
+    }
+    var captureSources: [String] { Array(Set(captures?.map(\.sourceLabel) ?? [sourceLabel])).sorted() }
+
+    var asCapture: NoteCapture {
+        NoteCapture(id: id, createdAt: createdAt, title: title, rawText: rawText, text: displayText,
+                    duration: duration, sourceApplication: sourceApplication, sourceBundleIdentifier: sourceBundleIdentifier)
+    }
+
+    mutating func appendCaptures(_ incoming: [NoteCapture]) {
+        let known = Set(captures?.map(\.id) ?? [])
+        let added = incoming.filter { !known.contains($0.id) }
+        guard !added.isEmpty else { return }
+        if let editedText { self.editedText = Self.join([editedText] + added.map(\.text)) }
+        let entries = ((captures ?? []) + added).sorted { $0.createdAt < $1.createdAt }
+        captures = entries
+        rawText = Self.join(entries.map(\.rawText))
+        cleanedText = Self.join(entries.map(\.text))
+        duration = entries.reduce(0) { $0 + $1.duration }
+        createdAt = entries.first?.createdAt ?? createdAt
+        let apps = Set(entries.compactMap(\.sourceApplication))
+        sourceApplication = apps.count == 1 ? apps.first : nil
+        let bundles = Set(entries.compactMap(\.sourceBundleIdentifier))
+        sourceBundleIdentifier = bundles.count == 1 ? bundles.first : nil
+    }
+
+    /// A pending editor save must retain dictations that arrived after editing began.
+    func mergingNewCaptures(from stored: VoiceNote) -> VoiceNote {
+        let known = Set(captures?.map(\.id) ?? [])
+        let added = (stored.captures ?? []).filter { !known.contains($0.id) }
+        guard !added.isEmpty else { return self }
+        var merged = self
+        merged.appendCaptures(added)
+        // Keep the user's in-progress body, including an intentionally empty edit.
+        merged.editedText = Self.join([displayText] + added.map(\.text))
+        return merged
+    }
+
+    private static func join(_ texts: [String]) -> String {
+        texts.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
 
     var displayText: String {
         editedText ?? (cleanedText.isEmpty ? rawText : cleanedText)
@@ -402,6 +466,10 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     }
 
     var sourceLabel: String {
+        if isDailyNote {
+            let sources = captureSources
+            return sources.count <= 2 ? sources.joined(separator: ", ") : "\(sources.count) apps"
+        }
         if let sourceApplication, !sourceApplication.isEmpty {
             return sourceApplication
         }

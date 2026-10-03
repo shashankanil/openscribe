@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case notes, meetings, general, speech, cleanup, personalize, privacy, permissions, calendar
+    case notes, meetings, general, connections, personalize, privacy, permissions, calendar
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -9,8 +9,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .notes: return "Notes"
         case .meetings: return "Meetings"
         case .general: return "General"
-        case .speech: return "Transcription"
-        case .cleanup: return "Writing"
+        case .connections: return "API & Models"
         case .personalize: return "Personalization"
         case .privacy: return "Privacy"
         case .permissions: return "Permissions"
@@ -22,8 +21,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .notes: return "text.alignleft"
         case .meetings: return "person.2.wave.2"
         case .general: return "slider.horizontal.3"
-        case .speech: return "mic"
-        case .cleanup: return "text.badge.checkmark"
+        case .connections: return "network"
         case .personalize: return "text.badge.plus"
         case .privacy: return "lock.shield"
         case .permissions: return "checkmark.shield"
@@ -31,7 +29,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
 
     static let library: [WorkspaceSection] = [.notes, .meetings, .calendar]
-    static let settings: [WorkspaceSection] = [.general, .speech, .cleanup, .personalize, .privacy, .permissions]
+    static let settings: [WorkspaceSection] = [.general, .connections, .personalize, .privacy, .permissions]
     var isSettings: Bool { Self.settings.contains(self) }
 }
 
