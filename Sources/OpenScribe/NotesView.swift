@@ -2,123 +2,129 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// What the editor pane shows. Today is always available, even before anything was captured.
+enum NoteSelection: Hashable {
+    case today
+    case note(UUID)
+}
+
 struct NotesView: View {
     @ObservedObject var controller: AppController
     @State private var search = ""
     @State private var filter: NoteFilter = .all
-    @State private var selectedID: UUID?
+    @State private var selection: NoteSelection = .today
     @State private var draft: VoiceNote?
     @State private var pendingDelete: VoiceNote?
-    @State private var displayLimit = 50
+    @State private var displayLimit = 60
     @FocusState private var searchFocused: Bool
 
     private var isVisible: Bool { controller.workspaceSection == .notes }
+    private var todayNote: VoiceNote? { controller.store.dayNote(for: Date()) }
+
     private var selectedNote: VoiceNote? {
-        if let selectedID {
-            return controller.store.note(withID: selectedID) ?? (draft?.id == selectedID ? draft : nil)
+        switch selection {
+        case .today: return todayNote
+        case let .note(id): return controller.store.note(withID: id) ?? (draft?.id == id ? draft : nil)
         }
-        return filteredNotes.first
-    }
-    private var filteredNotes: [VoiceNote] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let notes = controller.notes.filter {
-            (filter == .all || $0.isPinned) && (query.isEmpty
-                || $0.displayTitle.localizedCaseInsensitiveContains(query)
-                || $0.displayText.localizedCaseInsensitiveContains(query)
-                || $0.sourceLabel.localizedCaseInsensitiveContains(query)
-                || ($0.captures?.contains { $0.title.localizedCaseInsensitiveContains(query) || $0.text.localizedCaseInsensitiveContains(query) } ?? false))
-        }
-        return notes.filter(\.isPinned) + notes.filter { !$0.isPinned }
-    }
-    private var groups: [(title: String, notes: [VoiceNote])] {
-        var result: [(title: String, notes: [VoiceNote])] = []
-        for note in filteredNotes.prefix(displayLimit) {
-            let title = note.isPinned && filter == .all ? "Pinned" : Self.dayTitle(note.createdAt)
-            if result.last?.title == title { result[result.count - 1].notes.append(note) }
-            else { result.append((title, [note])) }
-        }
-        return result
     }
 
     var body: some View {
+        // Filter and group once per update; rows below skip re-rendering unless their note changed.
+        let listing = NoteLibraryListing(notes: controller.notes, today: todayNote, search: search, filter: filter, limit: displayLimit)
         HStack(spacing: 0) {
-            library.frame(minWidth: 245, idealWidth: 275, maxWidth: 290)
+            library(listing).frame(minWidth: 250, idealWidth: 280, maxWidth: 300)
             Rectangle().fill(FlowTheme.line).frame(width: 1)
-            Group {
-                if let note = selectedNote {
-                    NoteEditorView(note: note, controller: controller, focusOnOpen: draft?.id == note.id) {
-                        delete(note)
-                    }.id(note.id)
-                } else { emptyEditor }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(FlowTheme.surface)
+            editor
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(FlowTheme.surface)
         }
         .background(keyboardActions)
-        .onChange(of: search) { _, _ in displayLimit = 50 }
-        .onChange(of: filter) { _, _ in displayLimit = 50 }
+        .onChange(of: search) { _, _ in displayLimit = 60 }
+        .onChange(of: filter) { _, _ in displayLimit = 60 }
         .onChange(of: controller.workspaceSection) { _, section in
             if section != .notes { searchFocused = false }
         }
+        .onChange(of: controller.noteFocus) { _, focus in applyFocus(focus) }
+        .onAppear { applyFocus(controller.noteFocus) }
         .alert("Delete this note?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
             Button("Delete", role: .destructive) {
                 if let pendingDelete { delete(pendingDelete) }
                 pendingDelete = nil
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
-        } message: { Text("This permanently removes the note from this Mac.") }
+        } message: {
+            Text(pendingDelete?.isDailyNote == true
+                 ? "This removes every dictation, screenshot, and entry from this day. Linked meetings are kept."
+                 : "This permanently removes the note from this Mac.")
+        }
     }
 
-    private var library: some View {
+    @ViewBuilder private var editor: some View {
+        switch selection {
+        case .today:
+            DayNoteView(controller: controller, date: Date(), noteID: todayNote?.id) { pendingDelete = $0 }
+                .id("today-\(todayNote?.id.uuidString ?? "empty")")
+        case let .note(id):
+            if let note = selectedNote {
+                if note.isDailyNote {
+                    DayNoteView(controller: controller, date: note.createdAt, noteID: note.id) { pendingDelete = $0 }.id(id)
+                } else {
+                    NoteEditorView(note: note, controller: controller, focusOnOpen: draft?.id == note.id) {
+                        delete(note)
+                    }.id(id)
+                }
+            } else {
+                emptyEditor
+            }
+        }
+    }
+
+    // MARK: - Library
+
+    private func library(_ listing: NoteLibraryListing) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Notes").font(.system(size: 21, weight: .semibold)).tracking(-0.4)
                 Spacer()
-                Button(action: newNote) {
-                    Image(systemName: "square.and.pencil").font(.system(size: 16, weight: .medium))
-                        .frame(width: 30, height: 30)
-                }.buttonStyle(.plain).foregroundStyle(FlowTheme.inkMuted)
-                    .help("New note (⌘N)").accessibilityLabel("New note")
-            }.padding(.horizontal, 18).padding(.top, 28).padding(.bottom, 16)
-            FlowSearchField(text: $search, prompt: "Search notes", focus: $searchFocused)
-                .padding(.horizontal, 16).padding(.bottom, 12)
+                FlowIconButton(symbol: "square.and.pencil", help: "New note (⌘N)", size: 30, action: newNote)
+            }.padding(.horizontal, 18).padding(.top, 28).padding(.bottom, 14)
+            FlowSearchField(text: $search, prompt: "Search notes and screenshots", focus: $searchFocused)
+                .padding(.horizontal, 16).padding(.bottom, 10)
             HStack {
                 FlowTabs(items: NoteFilter.allCases.map { ($0, $0.title) }, selection: $filter)
-                Spacer()
-                Text("\(filteredNotes.count)").font(.system(size: 11.5)).monospacedDigit().foregroundStyle(FlowTheme.inkFaint)
+                Spacer(minLength: 0)
             }.padding(.horizontal, 16).padding(.bottom, 12)
             Rectangle().fill(FlowTheme.line).frame(height: 1)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
-                    if let draft, controller.store.note(withID: draft.id) == nil {
-                        Text("DRAFT").font(.system(size: 10, weight: .semibold)).tracking(0.8)
-                            .foregroundStyle(FlowTheme.inkFaint).padding(.leading, 10).padding(.top, 16).padding(.bottom, 3)
-                        NoteListRow(note: draft, selected: selectedNote?.id == draft.id) { open(draft.id) }
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if search.isEmpty && filter != .written {
+                        TodayRow(note: listing.today, selected: selection == .today) { open(.today) }
+                            .equatable()
+                            .padding(.top, 10)
                     }
-                    ForEach(groups, id: \.title) { group in
-                        Text(group.title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
-                            .foregroundStyle(FlowTheme.inkFaint).padding(.leading, 10).padding(.top, 16).padding(.bottom, 3)
+                    if let draft, controller.store.note(withID: draft.id) == nil {
+                        sectionLabel("Draft")
+                        NoteListRow(note: draft, selected: selection == .note(draft.id)) { open(.note(draft.id)) }
+                            .equatable()
+                    }
+                    ForEach(listing.groups, id: \.title) { group in
+                        sectionLabel(group.title)
                         ForEach(group.notes) { note in
-                            NoteListRow(note: note, selected: selectedNote?.id == note.id) { open(note.id) }
+                            NoteListRow(note: note, selected: selection == .note(note.id)) { open(.note(note.id)) }
+                                .equatable()
                                 .contextMenu {
-                                    Button("Copy text") { FlowFormat.copy(note.displayText); controller.flash("Copied to clipboard") }
+                                    Button("Copy text") { FlowFormat.copy(note.isDailyNote ? DayNoteExport.markdown(note) : note.displayText); controller.flash("Copied to clipboard") }
                                     Button(note.isPinned ? "Unpin" : "Pin") { controller.togglePin(note) }
                                     Divider()
                                     Button("Delete…", role: .destructive) { pendingDelete = note }
                                 }
                         }
                     }
-                    if filteredNotes.isEmpty && draft == nil {
-                        VStack(spacing: 7) {
-                            Text(search.isEmpty ? filter == .pinned ? "No pinned notes" : "Your notes live here" : "No matching notes")
-                                .font(.system(size: 13, weight: .medium)).foregroundStyle(FlowTheme.inkMuted)
-                            Text(search.isEmpty ? "Write a note or start a dictation." : "Try a different word.")
-                                .font(.system(size: 12)).foregroundStyle(FlowTheme.inkFaint)
-                            if !search.isEmpty { Button("Clear search") { search = "" }.buttonStyle(.flowGhost) }
-                        }.frame(maxWidth: .infinity).padding(.vertical, 35)
+                    if listing.filtered.isEmpty && draft == nil && !(search.isEmpty && filter != .written) {
+                        emptyLibrary
                     }
-                    if displayLimit < filteredNotes.count {
-                        Button("Show older notes") { displayLimit += 50 }.buttonStyle(.flowGhost)
+                    if displayLimit < listing.filtered.count {
+                        Button("Show older notes") { displayLimit += 60 }.buttonStyle(.flowGhost)
                             .frame(maxWidth: .infinity).padding(.vertical, 12)
                     }
                 }.padding(.horizontal, 8).padding(.bottom, 20)
@@ -126,93 +132,268 @@ struct NotesView: View {
         }.background(FlowTheme.background)
     }
 
+    private var emptyLibrary: some View {
+        VStack(spacing: 7) {
+            Text(search.isEmpty ? "No written notes yet" : "No matching notes")
+                .font(.system(size: 13, weight: .medium)).foregroundStyle(FlowTheme.inkMuted)
+            Text(search.isEmpty ? "Press ⌘N to write one." : "Try a different word.")
+                .font(.system(size: 12)).foregroundStyle(FlowTheme.inkFaint)
+            if !search.isEmpty { Button("Clear search") { search = "" }.buttonStyle(.flowGhost) }
+        }.frame(maxWidth: .infinity).padding(.vertical, 35)
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.8)
+            .foregroundStyle(FlowTheme.inkFaint).padding(.leading, 10).padding(.top, 16).padding(.bottom, 4)
+    }
+
     private var emptyEditor: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "text.alignleft").font(.system(size: 32, weight: .light)).foregroundStyle(FlowTheme.inkFaint)
-            VStack(spacing: 7) {
-                Text("A place for your thoughts").font(.system(size: 22, weight: .semibold)).tracking(-0.4)
-                Text("Write freely. Dictate when the words come faster.")
-                    .font(.system(size: 13)).foregroundStyle(FlowTheme.inkMuted)
-            }
-            HStack(spacing: 10) {
-                Button("New note", action: newNote).buttonStyle(.flowPrimary)
-                Button(controller.setupReadiness.canDictate ? "Start dictation" : "Set up dictation") {
-                    if controller.setupReadiness.canDictate { controller.startCapture() }
-                    else { controller.showOnboarding() }
-                }.buttonStyle(.flowSecondary).disabled(controller.isDictationBusy || controller.meetings.occupiesCapture)
-            }.padding(.top, 3)
-            FlowKeycaps(shortcut: "⌘ N").padding(.top, 10)
-        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        FlowEmptyState(symbol: "text.alignleft", title: "Nothing selected", message: "Pick a note, or go back to today.") {
+            Button("Today") { open(.today) }.buttonStyle(.flowPrimary)
+        }
     }
 
     private var keyboardActions: some View {
         ZStack {
             Button("New note", action: newNote).keyboardShortcut("n", modifiers: .command)
             Button("Search notes") { searchFocused = true }.keyboardShortcut("f", modifiers: .command)
+            Button("Today") { open(.today) }.keyboardShortcut("t", modifiers: .command)
         }.disabled(!isVisible).opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
     }
+
+    // MARK: - Actions
+
+    private func applyFocus(_ focus: NoteFocus?) {
+        guard let focus else { return }
+        search = ""
+        switch focus.target {
+        case .today: open(.today)
+        case let .note(id): open(.note(id))
+        }
+        controller.noteFocus = nil
+    }
+
     private func newNote() {
         controller.workspaceSection = .notes
-        search = ""; filter = .all; searchFocused = false
+        search = ""; searchFocused = false
+        if filter == .days { filter = .all }
         let note = controller.addManualNote()
-        draft = note; selectedID = note.id
+        draft = note
+        selection = .note(note.id)
     }
-    private func open(_ id: UUID) {
-        if let current = draft, current.id != id { draft = nil }
-        selectedID = id
+
+    private func open(_ target: NoteSelection) {
+        if let current = draft, target != .note(current.id) { draft = nil }
+        selection = target
     }
+
     private func delete(_ note: VoiceNote) {
         controller.deleteNote(note)
         if draft?.id == note.id { draft = nil }
-        if selectedID == note.id { selectedID = nil }
-        controller.flash("Note deleted")
+        if selection == .note(note.id) { selection = .today }
+        controller.flash(note.isDailyNote ? "Day deleted" : "Note deleted")
     }
-    private static func dayTitle(_ date: Date) -> String {
-        if Calendar.current.isDateInToday(date) { return "Today" }
-        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
-        return date.formatted(.dateTime.month(.abbreviated).day().year())
+
+    static func groupTitle(_ date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today" }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        if let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: Date())).day, days < 7 {
+            return "Previous 7 days"
+        }
+        return date.formatted(.dateTime.month(.wide).year())
     }
 }
 
 enum NoteFilter: String, CaseIterable, Identifiable {
-    case all, pinned
+    case all, days, written
     var id: String { rawValue }
-    var title: String { self == .all ? "All notes" : "Pinned" }
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .days: return "Days"
+        case .written: return "Written"
+        }
+    }
+
+    func includes(_ note: VoiceNote) -> Bool {
+        switch self {
+        case .all: return true
+        case .days: return note.isDailyNote
+        case .written: return !note.isDailyNote
+        }
+    }
 }
 
-private struct NoteListRow: View {
+/// The library's filtered, grouped notes, computed in one pass.
+struct NoteLibraryListing {
+    let today: VoiceNote?
+    let filtered: [VoiceNote]
+    let groups: [(title: String, notes: [VoiceNote])]
+
+    init(notes: [VoiceNote], today: VoiceNote?, search: String, filter: NoteFilter, limit: Int) {
+        self.today = today
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let todayID = today?.id
+        var pinned: [VoiceNote] = [], others: [VoiceNote] = []
+        for note in notes where filter.includes(note) {
+            if query.isEmpty {
+                // Today has its own row unless the user is searching.
+                if note.id == todayID { continue }
+            } else {
+                guard note.title.localizedCaseInsensitiveContains(query)
+                    || note.displayText.localizedCaseInsensitiveContains(query)
+                    || (note.captures?.contains { $0.matches(query) } ?? false) else { continue }
+            }
+            if note.isPinned { pinned.append(note) } else { others.append(note) }
+        }
+        filtered = pinned + others
+        var groups: [(title: String, notes: [VoiceNote])] = []
+        var titles: [Date: String] = [:]
+        let calendar = Calendar.current
+        for note in filtered.prefix(limit) {
+            let title: String
+            if note.isPinned { title = "Pinned" } else {
+                let day = calendar.startOfDay(for: note.lastCapturedAt)
+                if let known = titles[day] { title = known } else { title = NotesView.groupTitle(day); titles[day] = title }
+            }
+            if groups.last?.title == title { groups[groups.count - 1].notes.append(note) }
+            else { groups.append((title, [note])) }
+        }
+        self.groups = groups
+    }
+}
+
+// MARK: - Rows
+
+private struct TodayRow: View, Equatable {
+    let note: VoiceNote?
+    let selected: Bool
+    let onOpen: () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.selected == rhs.selected && lhs.note == rhs.note }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 10) {
+                Image(systemName: "sun.max").font(.system(size: 13, weight: .semibold)).foregroundStyle(FlowTheme.accent)
+                    .frame(width: 30, height: 30)
+                    .background(FlowTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Today").font(.system(size: 13, weight: .semibold)).foregroundStyle(FlowTheme.ink)
+                    Text(note.map { EntryCounts($0).summary } ?? Date().formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                        .font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 9)
+            .background(selected ? FlowTheme.surfaceHover : .clear, in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .flowHoverHighlight(radius: 9)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Counts of each kind of entry in a day, for compact summaries.
+struct EntryCounts {
+    var dictations = 0, screenshots = 0, meetings = 0, written = 0
+
+    init(_ note: VoiceNote) {
+        for capture in note.visibleCaptures {
+            switch capture.entryKind {
+            case .dictation: dictations += 1
+            case .screenshot: screenshots += 1
+            case .meeting: meetings += 1
+            case .text: written += 1
+            }
+        }
+    }
+
+    var summary: String {
+        var parts: [String] = []
+        if dictations > 0 { parts.append("\(dictations) dictation\(dictations == 1 ? "" : "s")") }
+        if meetings > 0 { parts.append("\(meetings) meeting\(meetings == 1 ? "" : "s")") }
+        if screenshots > 0 { parts.append("\(screenshots) screenshot\(screenshots == 1 ? "" : "s")") }
+        if written > 0 { parts.append("\(written) written") }
+        return parts.isEmpty ? "Nothing yet" : parts.joined(separator: " · ")
+    }
+
+    var symbols: [(symbol: String, count: Int)] {
+        [(CaptureKind.dictation.symbol, dictations), (CaptureKind.meeting.symbol, meetings),
+         (CaptureKind.screenshot.symbol, screenshots), (CaptureKind.text.symbol, written)].filter { $0.count > 0 }
+    }
+}
+
+private struct NoteListRow: View, Equatable {
     let note: VoiceNote
     let selected: Bool
     let onOpen: () -> Void
     @State private var hovering = false
+    private let title: String
+    private let preview: String
+    private let symbols: [(symbol: String, count: Int)]
+
+    init(note: VoiceNote, selected: Bool, onOpen: @escaping () -> Void) {
+        self.note = note
+        self.selected = selected
+        self.onOpen = onOpen
+        if note.isDailyNote {
+            let counts = EntryCounts(note)
+            title = note.createdAt.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+            let text = note.latestText
+            preview = Self.clipped(text.isEmpty ? counts.summary : text)
+            symbols = counts.symbols
+        } else {
+            title = note.displayTitle
+            preview = note.displayText.isEmpty ? "Start writing…" : Self.clipped(note.displayText)
+            symbols = []
+        }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.selected == rhs.selected && lhs.note == rhs.note }
+
+    /// Two preview lines never need more than this; long notes would otherwise be laid out in full.
+    private static func clipped(_ text: String) -> String {
+        text.count > 280 ? String(text.prefix(280)) : text
+    }
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    Text(note.displayTitle).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                    Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 0)
                     if note.isPinned { Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(FlowTheme.accent) }
                 }.foregroundStyle(FlowTheme.ink)
-                Text(note.displayText.isEmpty ? "Start writing…" : note.displayText)
-                    .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted).lineSpacing(2).lineLimit(2)
-                HStack(spacing: 5) {
-                    Text(note.isDailyNote ? note.captureCountLabel : note.createdAt.formatted(date: .omitted, time: .shortened))
-                    Text("·")
-                    Image(systemName: note.duration > 0 ? "waveform" : "square.and.pencil").font(.system(size: 9))
-                    Text(note.sourceLabel).lineLimit(1)
+                Text(preview).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted).lineSpacing(2).lineLimit(2)
+                HStack(spacing: 8) {
+                    if note.isDailyNote {
+                        ForEach(symbols, id: \.symbol) { item in
+                            HStack(spacing: 3) {
+                                Image(systemName: item.symbol).font(.system(size: 9))
+                                Text("\(item.count)").monospacedDigit()
+                            }
+                        }
+                    } else {
+                        Image(systemName: "text.alignleft").font(.system(size: 9))
+                        Text(note.createdAt.formatted(date: .abbreviated, time: .omitted))
+                    }
                 }.font(.system(size: 10.5)).foregroundStyle(FlowTheme.inkFaint)
             }.frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
-                .padding(.horizontal, 12).padding(.vertical, 13)
+                .padding(.horizontal, 12).padding(.vertical, 11)
                 .background(selected ? FlowTheme.surfaceHover : hovering ? FlowTheme.surfaceMuted : .clear,
                             in: RoundedRectangle(cornerRadius: 9))
                 .overlay(alignment: .leading) {
-                    if selected { RoundedRectangle(cornerRadius: 2).fill(FlowTheme.accent).frame(width: 3).padding(.vertical, 13) }
+                    if selected { RoundedRectangle(cornerRadius: 2).fill(FlowTheme.accent).frame(width: 3).padding(.vertical, 12) }
                 }.contentShape(Rectangle())
         }.buttonStyle(.plain).onHover { hovering = $0 }
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
+
+// MARK: - Written note editor
 
 struct NoteEditorView: View {
     @ObservedObject var controller: AppController
@@ -222,14 +403,10 @@ struct NoteEditorView: View {
     @State private var lastSaved: VoiceNote?
     @State private var showOriginal = false
     @State private var showCorrection = false
-    @State private var showActivity = false
     @State private var showDelete = false
     @State private var deleted = false
     @State private var saveFailed = false
     @State private var saveTask: Task<Void, Never>?
-    @State private var correctionHeard = ""
-    @State private var correctionReplacement = ""
-    @State private var correctionFailure: String?
     @FocusState private var editorFocused: Bool
 
     init(note: VoiceNote, controller: AppController, focusOnOpen: Bool = false, onDelete: @escaping () -> Void) {
@@ -247,45 +424,21 @@ struct NoteEditorView: View {
     private var bodyText: Binding<String> {
         Binding(get: { note.displayText }, set: { note.editedText = $0 })
     }
-    private var timeRange: String {
-        let start = note.createdAt.formatted(date: .omitted, time: .shortened)
-        let end = note.lastCapturedAt.formatted(date: .omitted, time: .shortened)
-        return start == end ? start : "\(start) – \(end)"
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Rectangle().fill(FlowTheme.line).frame(height: 1)
             VStack(alignment: .leading, spacing: 0) {
-                Text(note.isDailyNote ? note.createdAt.formatted(.dateTime.weekday(.wide).month(.wide).day().year())
-                     : note.createdAt.formatted(.dateTime.month(.wide).day().year().hour().minute()))
-                    .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).padding(.bottom, 15)
+                Text(note.createdAt.formatted(.dateTime.month(.wide).day().year().hour().minute()))
+                    .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).padding(.bottom, 14)
                 TextField("Untitled note", text: $note.title, axis: .vertical)
                     .textFieldStyle(.plain).font(.system(size: 28, weight: .semibold)).tracking(-0.7)
-                    .lineLimit(1...3).accessibilityLabel("Note title").padding(.bottom, 12)
-                HStack(spacing: 7) {
-                    Image(systemName: note.duration > 0 ? "waveform" : "square.and.pencil")
-                    Text(note.isDailyNote ? note.captureCountLabel : note.sourceLabel).fixedSize(horizontal: note.isDailyNote, vertical: false)
-                    if note.duration > 0 { Text("·"); Text(FlowFormat.duration(note.duration)).monospacedDigit() }
-                    Spacer()
-                    if hasOriginal || showOriginal {
-                        Picker("Transcript version", selection: $showOriginal) {
-                            Text("Note").tag(false); Text("Original").tag(true)
-                        }.pickerStyle(.segmented).labelsHidden().frame(width: 145)
-                    }
-                }.font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).padding(.bottom, note.isDailyNote ? 10 : 24)
-                if note.isDailyNote {
-                    HStack(spacing: 12) {
-                        Text("\(timeRange) · \(note.sourceLabel)")
-                            .font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint).lineLimit(2)
-                        Spacer(minLength: 0)
-                        Button { showActivity = true } label: {
-                            Label("Activity", systemImage: "clock")
-                        }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(FlowTheme.accent).fixedSize()
-                            .help("Capture times, source apps, and original transcripts")
-                            .popover(isPresented: $showActivity, arrowEdge: .bottom) { captureActivity }
-                    }.padding(.bottom, 20)
+                    .lineLimit(1...3).accessibilityLabel("Note title").padding(.bottom, 18)
+                if hasOriginal || showOriginal {
+                    Picker("Transcript version", selection: $showOriginal) {
+                        Text("Note").tag(false); Text("Original").tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 145).padding(.bottom, 16)
                 }
                 if showOriginal {
                     ScrollView {
@@ -299,19 +452,19 @@ struct NoteEditorView: View {
                             .accessibilityLabel("Note text")
                             .padding(.horizontal, -5)
                         if note.displayText.isEmpty {
-                            Text("Start writing, or capture a thought with your voice.")
+                            Text("Start writing…")
                                 .font(.system(size: 15)).foregroundStyle(FlowTheme.inkFaint)
                                 .padding(.top, 1).allowsHitTesting(false)
                         }
                     }
                 }
-            }.padding(.horizontal, 32).padding(.top, 27).padding(.bottom, 16)
-                .frame(maxWidth: 800, maxHeight: .infinity, alignment: .topLeading)
+            }.padding(.horizontal, 36).padding(.top, 28).padding(.bottom, 16)
+                .frame(maxWidth: 780, maxHeight: .infinity, alignment: .topLeading)
             HStack {
                 if showOriginal { Label("Original transcript · read only", systemImage: "lock").font(.system(size: 11)) }
                 Spacer()
                 Text("\(wordCount) \(wordCount == 1 ? "word" : "words")").font(.system(size: 11)).monospacedDigit()
-            }.foregroundStyle(FlowTheme.inkFaint).padding(.horizontal, 32).padding(.bottom, 18)
+            }.foregroundStyle(FlowTheme.inkFaint).padding(.horizontal, 36).padding(.bottom, 18)
         }
         .onChange(of: note) { _, _ in scheduleSave() }
         .onChange(of: controller.workspaceSection) { _, section in
@@ -331,19 +484,16 @@ struct NoteEditorView: View {
             Button("Delete", role: .destructive) { deleted = true; saveTask?.cancel(); onDelete() }
             Button("Cancel", role: .cancel) {}
         } message: { Text("This permanently removes the note from this Mac.") }
-        .sheet(isPresented: $showCorrection) { correctionEditor }
+        .sheet(isPresented: $showCorrection) { CorrectionEditor(controller: controller, isPresented: $showCorrection) }
     }
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            Image(systemName: note.duration > 0 ? "waveform" : "doc.text").font(.system(size: 13)).foregroundStyle(FlowTheme.inkFaint)
-            Text(note.isDailyNote ? "Daily note" : note.duration > 0 ? "Dictation" : "Note").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.inkMuted)
-            Spacer()
+            Text(saveLabel).font(.system(size: 11)).foregroundStyle(saveFailed ? FlowTheme.warning : FlowTheme.inkFaint)
             if saveFailed {
                 Button("Retry saving") { persist() }.buttonStyle(.flow(.ghost, size: .small))
             }
-            Text(saveLabel).font(.system(size: 11)).foregroundStyle(saveFailed ? FlowTheme.warning : FlowTheme.inkFaint)
-            Rectangle().fill(FlowTheme.line).frame(width: 1, height: 16).padding(.horizontal, 3)
+            Spacer()
             FlowIconButton(symbol: note.isPinned ? "pin.fill" : "pin", help: note.isPinned ? "Unpin note" : "Pin note",
                            tint: note.isPinned ? FlowTheme.accent : FlowTheme.inkMuted) { note.isPinned.toggle() }
             FlowIconButton(symbol: "doc.on.doc", help: "Copy note") {
@@ -351,45 +501,12 @@ struct NoteEditorView: View {
             }.disabled((showOriginal ? note.rawText : note.displayText).isEmpty)
             Menu {
                 Button("Export as text…", action: exportNote)
-                Button("Teach a correction…") { correctionFailure = nil; showCorrection = true }
+                Button("Teach a correction…") { showCorrection = true }
                 Divider()
                 Button("Delete note…", role: .destructive) { showDelete = true }
             } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Note actions")
-        }.padding(.horizontal, 20).frame(height: 68)
-    }
-
-    private var captureActivity: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Capture activity").font(.system(size: 17, weight: .semibold))
-                Spacer()
-                Text(note.captureCountLabel).font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint)
-            }
-            Text("Each dictation joins this daily note. Original transcripts and source details stay here.")
-                .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(note.captures ?? []) { capture in
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack(spacing: 6) {
-                                Text(capture.createdAt.formatted(date: .omitted, time: .shortened))
-                                    .fontWeight(.semibold).foregroundStyle(FlowTheme.ink)
-                                Text("· \(FlowFormat.duration(capture.duration)) · \(capture.sourceLabel)").lineLimit(1)
-                                Spacer(minLength: 0)
-                                FlowIconButton(symbol: "doc.on.doc", help: "Copy this capture", size: 24) { FlowFormat.copy(capture.text) }
-                            }.font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint)
-                            if !capture.title.isEmpty {
-                                Text(capture.title).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                            }
-                            Text(capture.rawText).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        Divider()
-                    }
-                }
-            }.frame(maxHeight: 320)
-        }.padding(20).frame(width: 410).background(FlowTheme.background).foregroundStyle(FlowTheme.ink)
+        }.padding(.horizontal, 20).frame(height: 52)
     }
 
     private func synchronize(_ stored: VoiceNote?) {
@@ -402,37 +519,6 @@ struct NoteEditorView: View {
         lastSaved = stored
     }
 
-    private var correctionEditor: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Teach a correction").font(.system(size: 22, weight: .semibold))
-            Text("OpenScribe will remember this replacement for future dictations.").font(.system(size: 13)).foregroundStyle(FlowTheme.inkMuted)
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Usually transcribed as").font(.system(size: 12, weight: .medium))
-                TextField("Word or phrase", text: $correctionHeard).flowField()
-            }
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Replace with").font(.system(size: 12, weight: .medium))
-                TextField("Correct spelling", text: $correctionReplacement).flowField()
-            }
-            if let correctionFailure { Text(correctionFailure).font(.system(size: 12)).foregroundStyle(FlowTheme.warning) }
-            Divider()
-            HStack {
-                Spacer()
-                Button("Cancel") { showCorrection = false }.buttonStyle(.flowSecondary).keyboardShortcut(.cancelAction)
-                Button("Save correction") {
-                    let heard = correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let saved = controller.updateSettings {
-                        $0.correctionRules.removeAll { $0.heard.caseInsensitiveCompare(heard) == .orderedSame }
-                        $0.correctionRules.append(CorrectionRule(heard: heard, replacement: correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    }
-                    guard saved else { correctionFailure = "Couldn’t save the correction. Check local storage and try again."; return }
-                    correctionHeard = ""; correctionReplacement = ""; showCorrection = false
-                    controller.flash("Correction saved")
-                }.buttonStyle(.flowPrimary).keyboardShortcut(.defaultAction)
-                    .disabled(correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }.padding(28).frame(width: 420).background(FlowTheme.background)
-    }
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task { @MainActor in
@@ -451,13 +537,65 @@ struct NoteEditorView: View {
     }
     private func exportNote() {
         persist()
+        let text = showOriginal ? note.rawText : note.displayText
+        NoteExporter.save(text, suggestedName: note.displayTitle, controller: controller)
+    }
+}
+
+enum NoteExporter {
+    @MainActor
+    static func save(_ text: String, suggestedName: String, type: UTType = .plainText, controller: AppController) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = String(note.displayTitle.prefix(80)).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") + ".txt"
+        panel.allowedContentTypes = [type]
+        let ext = type == .plainText ? "txt" : "md"
+        panel.nameFieldStringValue = String(suggestedName.prefix(80)).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") + ".\(ext)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try (showOriginal ? note.rawText : note.displayText).write(to: url, atomically: true, encoding: .utf8)
+            try text.write(to: url, atomically: true, encoding: .utf8)
             controller.flash("Exported")
         } catch { controller.report(error) }
+    }
+}
+
+struct CorrectionEditor: View {
+    @ObservedObject var controller: AppController
+    @Binding var isPresented: Bool
+    var heard = ""
+    @State private var correctionHeard = ""
+    @State private var correctionReplacement = ""
+    @State private var correctionFailure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Teach a correction").font(.system(size: 22, weight: .semibold))
+            Text("OpenScribe will remember this replacement for future dictations.").font(.system(size: 13)).foregroundStyle(FlowTheme.inkMuted)
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Usually transcribed as").font(.system(size: 12, weight: .medium))
+                TextField("Word or phrase", text: $correctionHeard).flowField()
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Replace with").font(.system(size: 12, weight: .medium))
+                TextField("Correct spelling", text: $correctionReplacement).flowField()
+            }
+            if let correctionFailure { Text(correctionFailure).font(.system(size: 12)).foregroundStyle(FlowTheme.warning) }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }.buttonStyle(.flowSecondary).keyboardShortcut(.cancelAction)
+                Button("Save correction") {
+                    let heard = correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let saved = controller.updateSettings {
+                        $0.correctionRules.removeAll { $0.heard.caseInsensitiveCompare(heard) == .orderedSame }
+                        $0.correctionRules.append(CorrectionRule(heard: heard, replacement: correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    }
+                    guard saved else { correctionFailure = "Couldn’t save the correction. Check local storage and try again."; return }
+                    isPresented = false
+                    controller.flash("Correction saved")
+                }.buttonStyle(.flowPrimary).keyboardShortcut(.defaultAction)
+                    .disabled(correctionHeard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || correctionReplacement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(28).frame(width: 420).background(FlowTheme.background)
+        .onAppear { correctionHeard = heard }
     }
 }

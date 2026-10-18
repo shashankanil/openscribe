@@ -191,6 +191,29 @@ enum ShortcutFormatter {
         case 28: return "8"
         case 25: return "9"
         case 29: return "0"
+        case 27: return "-"
+        case 24: return "="
+        case 33: return "["
+        case 30: return "]"
+        case 41: return ";"
+        case 39: return "'"
+        case 43: return ","
+        case 47: return "."
+        case 44: return "/"
+        case 42: return "\\"
+        case 50: return "`"
+        case 122: return "F1"
+        case 120: return "F2"
+        case 99: return "F3"
+        case 118: return "F4"
+        case 96: return "F5"
+        case 97: return "F6"
+        case 98: return "F7"
+        case 100: return "F8"
+        case 101: return "F9"
+        case 109: return "F10"
+        case 103: return "F11"
+        case 111: return "F12"
         case 0: return "A"
         case 1: return "S"
         case 2: return "D"
@@ -212,6 +235,11 @@ enum ShortcutFormatter {
         case 34: return "I"
         case 31: return "O"
         case 35: return "P"
+        case 37: return "L"
+        case 38: return "J"
+        case 40: return "K"
+        case 45: return "N"
+        case 46: return "M"
         case 63: return "Globe"
         default: return "Key \(keyCode)"
         }
@@ -271,6 +299,14 @@ struct AppSettings: Codable, Equatable {
     var customVocabulary: [String] = []
     var correctionRules: [CorrectionRule] = []
     var cleanupStrength: CleanupStrength = .clear
+    /// Send the dictionary to the speech model as spelling hints.
+    var speechHints = true
+    /// Understand spoken corrections such as spelling a word out.
+    var spokenCorrections = true
+    /// Add words the speaker spells out to the vocabulary.
+    var learnSpelledWords = true
+    /// Model that classifies spoken corrections. Empty uses the writing model.
+    var correctionModel = ""
 
     var automaticStreaming = true
     var dictationLiveTranscription = true
@@ -296,6 +332,12 @@ struct AppSettings: Codable, Equatable {
     var overlayPosition = "bottom-center"
     var dictationMode: DictationMode = .toggle
     var theme: FlowThemeVariant = .system
+    var shortcuts: [String: KeyShortcut] = Dictionary(uniqueKeysWithValues: ShortcutDefaults.bindings.map { ($0.key.rawValue, $0.value) })
+    /// Where the Flowbar was dragged to. `nil` uses the preset in `overlayPosition`.
+    var flowbarPlacement: FlowbarPlacement?
+    var meetingMicrophone = true
+    var meetingSystemAudio = true
+    var meetingSummarize = true
 
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
@@ -303,9 +345,11 @@ struct AppSettings: Codable, Equatable {
         case dictationLiveTranscription, meetingLiveTranscription, automaticStreaming
         case calendarEnabled, calendarIDs, calendarExcludedTitles, calendarAutoStart, calendarMeetingsOnly, calendarSummarize
         case writingTone, customVocabulary, correctionRules, cleanupStrength
+        case speechHints, spokenCorrections, learnSpelledWords, correctionModel
         case cleanupEnabled, pasteIntoFocusedApp, saveRawAudio
         case showOverlayWhenIdle, shortcutDisplay, shortcutKeyCode, shortcutModifiers, overlayPosition
         case dictationMode, theme, interactionSounds, snippets, appWritingTones, microphoneDeviceUID
+        case shortcuts, flowbarPlacement, meetingMicrophone, meetingSystemAudio, meetingSummarize
     }
 
     init() {}
@@ -332,6 +376,10 @@ struct AppSettings: Codable, Equatable {
         customVocabulary = try container.decodeIfPresent([String].self, forKey: .customVocabulary) ?? []
         correctionRules = try container.decodeIfPresent([CorrectionRule].self, forKey: .correctionRules) ?? []
         cleanupStrength = try container.decodeIfPresent(CleanupStrength.self, forKey: .cleanupStrength) ?? .clear
+        speechHints = try container.decodeIfPresent(Bool.self, forKey: .speechHints) ?? true
+        spokenCorrections = try container.decodeIfPresent(Bool.self, forKey: .spokenCorrections) ?? true
+        learnSpelledWords = try container.decodeIfPresent(Bool.self, forKey: .learnSpelledWords) ?? true
+        correctionModel = try container.decodeIfPresent(String.self, forKey: .correctionModel) ?? ""
         languageModel = try container.decodeIfPresent(String.self, forKey: .languageModel) ?? languageModelProvider.defaultModel
         cleanupEnabled = try container.decodeIfPresent(Bool.self, forKey: .cleanupEnabled) ?? true
         pasteIntoFocusedApp = try container.decodeIfPresent(Bool.self, forKey: .pasteIntoFocusedApp) ?? true
@@ -356,7 +404,23 @@ struct AppSettings: Codable, Equatable {
         snippets = try container.decodeIfPresent([VoiceSnippet].self, forKey: .snippets) ?? []
         appWritingTones = try container.decodeIfPresent([String: WritingTone].self, forKey: .appWritingTones) ?? [:]
         theme = try container.decodeIfPresent(FlowThemeVariant.self, forKey: .theme) ?? .system
+        shortcuts = try container.decodeIfPresent([String: KeyShortcut].self, forKey: .shortcuts)
+            ?? ShortcutDefaults.migrated(keyCode: shortcutKeyCode, modifiers: shortcutModifiers, display: shortcutDisplay, mode: dictationMode)
+        flowbarPlacement = try container.decodeIfPresent(FlowbarPlacement.self, forKey: .flowbarPlacement)
+        meetingMicrophone = try container.decodeIfPresent(Bool.self, forKey: .meetingMicrophone) ?? true
+        meetingSystemAudio = try container.decodeIfPresent(Bool.self, forKey: .meetingSystemAudio) ?? true
+        meetingSummarize = try container.decodeIfPresent(Bool.self, forKey: .meetingSummarize) ?? true
     }
+}
+
+/// A Flowbar position chosen by dragging, relative to the visible area of a display.
+struct FlowbarPlacement: Codable, Equatable {
+    var screen: String
+    /// Center of the pill, as a fraction of the screen's visible frame.
+    var x: Double
+    var y: Double
+    /// "left" or "right" when docked vertically against a side of the screen.
+    var edge: String? = nil
 }
 
 struct NoteCapture: Identifiable, Codable, Hashable {
@@ -368,9 +432,38 @@ struct NoteCapture: Identifiable, Codable, Hashable {
     var duration: TimeInterval
     var sourceApplication: String?
     var sourceBundleIdentifier: String?
+    // Optional so captures saved before typed entries keep decoding as dictations.
+    var kind: CaptureKind?
+    /// File name inside the attachments folder, for screenshots.
+    var attachment: String?
+    var meetingID: UUID?
+    /// Text found in a screenshot. Used for search only.
+    var recognizedText: String?
+    /// Replaced by an edit from before day notes became timelines. Kept for its original transcript and ID.
+    var superseded: Bool?
+
+    var entryKind: CaptureKind { kind ?? .dictation }
+    var isVisible: Bool { superseded != true }
 
     var sourceLabel: String {
         sourceApplication.flatMap { $0.isEmpty ? nil : $0 } ?? "Active app unavailable"
+    }
+
+    func matches(_ query: String) -> Bool {
+        [title, text, recognizedText ?? "", sourceApplication ?? ""].contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+}
+
+enum CaptureKind: String, Codable {
+    case dictation, screenshot, meeting, text
+
+    var symbol: String {
+        switch self {
+        case .dictation: return "waveform"
+        case .screenshot: return "camera.viewfinder"
+        case .meeting: return "person.2.wave.2"
+        case .text: return "text.alignleft"
+        }
     }
 }
 
@@ -393,12 +486,16 @@ struct VoiceNote: Identifiable, Codable, Hashable {
 
     var isDailyNote: Bool { captures != nil }
     var lastCapturedAt: Date { captures?.last?.createdAt ?? createdAt }
-    var latestText: String { captures?.last?.text ?? displayText }
+    var latestText: String { captures?.last(where: { $0.isVisible && !$0.text.isEmpty })?.text ?? displayText }
+    var visibleCaptures: [NoteCapture] { captures?.filter(\.isVisible) ?? [] }
     var captureCountLabel: String {
-        let count = captures?.count ?? 1
-        return "\(count) \(count == 1 ? "capture" : "captures")"
+        let count = captures.map { $0.filter(\.isVisible).count } ?? 1
+        return "\(count) \(count == 1 ? "entry" : "entries")"
     }
-    var captureSources: [String] { Array(Set(captures?.map(\.sourceLabel) ?? [sourceLabel])).sorted() }
+    var captureSources: [String] {
+        guard let captures else { return [sourceLabel] }
+        return Array(Set(captures.compactMap { $0.sourceApplication.flatMap { $0.isEmpty ? nil : $0 } })).sorted()
+    }
 
     var asCapture: NoteCapture {
         NoteCapture(id: id, createdAt: createdAt, title: title, rawText: rawText, text: displayText,
@@ -410,16 +507,56 @@ struct VoiceNote: Identifiable, Codable, Hashable {
         let added = incoming.filter { !known.contains($0.id) }
         guard !added.isEmpty else { return }
         if let editedText { self.editedText = Self.join([editedText] + added.map(\.text)) }
-        let entries = ((captures ?? []) + added).sorted { $0.createdAt < $1.createdAt }
-        captures = entries
-        rawText = Self.join(entries.map(\.rawText))
-        cleanedText = Self.join(entries.map(\.text))
+        captures = ((captures ?? []) + added).sorted { $0.createdAt < $1.createdAt }
+        recomputeFromCaptures()
+    }
+
+    /// Replace one entry of a day note, keeping the combined text in step.
+    mutating func updateCapture(_ capture: NoteCapture) {
+        guard let index = captures?.firstIndex(where: { $0.id == capture.id }) else { return }
+        captures?[index] = capture
+        recomputeFromCaptures()
+    }
+
+    mutating func removeCapture(_ id: UUID) {
+        captures?.removeAll { $0.id == id }
+        recomputeFromCaptures()
+    }
+
+    private mutating func recomputeFromCaptures() {
+        let entries = captures ?? []
+        // Written entries have no transcript of their own; their rawText only points back to replaced dictations.
+        rawText = Self.join(entries.filter { $0.entryKind != .text }.map(\.rawText))
+        cleanedText = Self.join(entries.filter(\.isVisible).map(\.text))
         duration = entries.reduce(0) { $0 + $1.duration }
         createdAt = entries.first?.createdAt ?? createdAt
         let apps = Set(entries.compactMap(\.sourceApplication))
         sourceApplication = apps.count == 1 ? apps.first : nil
         let bundles = Set(entries.compactMap(\.sourceBundleIdentifier))
         sourceBundleIdentifier = bundles.count == 1 ? bundles.first : nil
+    }
+
+    /// Day notes used to be edited as one body. Keep such an edit as a written entry so the
+    /// timeline can show it, while the original dictations stay available as its source.
+    func migratedToTimeline() -> VoiceNote {
+        guard isDailyNote, let edited = editedText, let entries = captures else { return self }
+        var note = self
+        note.editedText = nil
+        let visible = entries.filter(\.isVisible)
+        if edited != Self.join(visible.map(\.text)) {
+            let start = visible.first?.createdAt ?? createdAt
+            var replaced = entries.map { entry -> NoteCapture in
+                var entry = entry
+                if entry.isVisible && (entry.entryKind == .dictation || entry.entryKind == .text) { entry.superseded = true }
+                return entry
+            }
+            let originals = Self.join(replaced.filter { $0.superseded == true }.map { $0.rawText.isEmpty ? $0.text : $0.rawText })
+            replaced.append(NoteCapture(id: UUID(), createdAt: start, title: "", rawText: originals, text: edited, duration: 0,
+                                        sourceApplication: nil, sourceBundleIdentifier: nil, kind: .text))
+            note.captures = replaced.sorted { $0.createdAt < $1.createdAt }
+        }
+        note.recomputeFromCaptures()
+        return note
     }
 
     /// A pending editor save must retain dictations that arrived after editing began.
@@ -430,7 +567,7 @@ struct VoiceNote: Identifiable, Codable, Hashable {
         var merged = self
         merged.appendCaptures(added)
         // Keep the user's in-progress body, including an intentionally empty edit.
-        merged.editedText = Self.join([displayText] + added.map(\.text))
+        if editedText != nil { merged.editedText = Self.join([displayText] + added.map(\.text)) }
         return merged
     }
 
@@ -439,7 +576,9 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     }
 
     var displayText: String {
-        editedText ?? (cleanedText.isEmpty ? rawText : cleanedText)
+        // A day note shows exactly its visible entries, even when they were cleared.
+        if isDailyNote && editedText == nil { return cleanedText }
+        return editedText ?? (cleanedText.isEmpty ? rawText : cleanedText)
     }
 
     var displayTitle: String {
@@ -468,6 +607,7 @@ struct VoiceNote: Identifiable, Codable, Hashable {
     var sourceLabel: String {
         if isDailyNote {
             let sources = captureSources
+            if sources.isEmpty { return "Day note" }
             return sources.count <= 2 ? sources.joined(separator: ", ") : "\(sources.count) apps"
         }
         if let sourceApplication, !sourceApplication.isEmpty {

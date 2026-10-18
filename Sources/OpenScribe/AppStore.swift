@@ -41,6 +41,20 @@ final class AppStore: ObservableObject {
             persistNotes()
         }
         groupExistingDictations()
+        migrateEditedDayNotes()
+    }
+
+    private func migrateEditedDayNotes() {
+        guard notes.contains(where: { $0.isDailyNote && $0.editedText != nil }), !blockedFiles.contains(notesURL) else { return }
+        let backup = rootURL.appendingPathComponent("notes-before-day-timeline-\(UUID()).json")
+        do { try FileManager.default.copyItem(at: notesURL, to: backup) }
+        catch {
+            blockedFiles.insert(notesURL)
+            loadNotices.append("Could not back up note history before updating day notes. Saving is blocked to protect the original data.\n\n\(error.localizedDescription)")
+            refreshStorageError()
+            return
+        }
+        notes = notes.map { $0.migratedToTimeline() }
     }
 
     func updateSpeechProvider(_ provider: SpeechProvider) {
@@ -93,20 +107,90 @@ final class AppStore: ObservableObject {
             sourceApplication: sourceApplication,
             sourceBundleIdentifier: sourceBundleIdentifier
         )
-        var updated = notes
         if source == "Dictation" {
-            let capture = note.asCapture
-            if let index = notes.firstIndex(where: { $0.isDailyNote && Calendar.current.isDate($0.createdAt, inSameDayAs: createdAt) }) {
-                note = notes[index]
-                note.appendCaptures([capture])
-                updated.remove(at: index)
-            } else {
-                note.title = createdAt.formatted(.dateTime.month(.wide).day().year())
-                note.captures = [capture]
-            }
+            var capture = note.asCapture
+            capture.kind = .dictation
+            return addCapture(capture)
+        }
+        notes = (notes + [note]).sorted { $0.lastCapturedAt > $1.lastCapturedAt }
+        return note
+    }
+
+    /// Every capture of a day (dictations, screenshots, meetings, written entries) joins that day's note.
+    @discardableResult
+    func addCapture(_ capture: NoteCapture) -> VoiceNote {
+        var updated = notes
+        var note: VoiceNote
+        if let index = notes.firstIndex(where: { $0.isDailyNote && Calendar.current.isDate($0.createdAt, inSameDayAs: capture.createdAt) }) {
+            note = notes[index]
+            note.appendCaptures([capture])
+            updated.remove(at: index)
+        } else {
+            // The first capture's ID names the day, so a retried capture finds the note it created.
+            note = VoiceNote(id: capture.id, createdAt: capture.createdAt, title: Self.dayTitle(capture.createdAt), rawText: "",
+                             cleanedText: "", duration: 0, source: "Dictation")
+            note.captures = []
+            note.appendCaptures([capture])
         }
         notes = (updated + [note]).sorted { $0.lastCapturedAt > $1.lastCapturedAt }
         return note
+    }
+
+    func dayNote(for date: Date) -> VoiceNote? {
+        notes.first { $0.isDailyNote && Calendar.current.isDate($0.createdAt, inSameDayAs: date) }
+    }
+
+    @discardableResult
+    func updateCapture(_ capture: NoteCapture, in noteID: UUID) -> Bool {
+        guard let index = notes.firstIndex(where: { $0.id == noteID }) else { return false }
+        var note = notes[index]
+        note.updateCapture(capture)
+        notes[index] = note
+        return lastNotesWriteSucceeded
+    }
+
+    func removeCapture(_ captureID: UUID, from noteID: UUID) {
+        guard let index = notes.firstIndex(where: { $0.id == noteID }) else { return }
+        let removed = notes[index].captures?.first { $0.id == captureID }
+        var note = notes[index]
+        note.removeCapture(captureID)
+        if note.captures?.isEmpty == true { notes.remove(at: index) } else { notes[index] = note }
+        if let removed { deleteAttachment(of: removed) }
+    }
+
+    /// Meetings link into the day they were recorded. Deleting a meeting removes its entry;
+    /// screenshots taken during it stay in the day note, just no longer linked.
+    func removeMeetingEntries(_ meetingID: UUID) {
+        for note in notes where note.captures?.contains(where: { $0.meetingID == meetingID }) == true {
+            for var capture in note.captures ?? [] where capture.meetingID == meetingID {
+                if capture.entryKind == .meeting {
+                    removeCapture(capture.id, from: note.id)
+                } else {
+                    capture.meetingID = nil
+                    updateCapture(capture, in: note.id)
+                }
+            }
+        }
+    }
+
+    /// Screenshots taken while a meeting was running, oldest first.
+    func meetingScreenshots(_ meetingID: UUID) -> [NoteCapture] {
+        notes.flatMap { $0.captures ?? [] }
+            .filter { $0.meetingID == meetingID && $0.entryKind == .screenshot && $0.isVisible }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    var attachmentsURL: URL { rootURL.appendingPathComponent("Attachments", isDirectory: true) }
+
+    func attachmentURL(_ name: String) -> URL { attachmentsURL.appendingPathComponent(name) }
+
+    private func deleteAttachment(of capture: NoteCapture) {
+        guard let name = capture.attachment else { return }
+        try? FileManager.default.removeItem(at: attachmentURL(name))
+    }
+
+    static func dayTitle(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.wide).day().year())
     }
 
     func addManualNote() -> VoiceNote {
@@ -117,7 +201,7 @@ final class AppStore: ObservableObject {
     @discardableResult
     func updateNote(_ note: VoiceNote) -> Bool {
         if let index = notes.firstIndex(where: { $0.id == note.id }) {
-            notes[index] = note.mergingNewCaptures(from: notes[index])
+            notes[index] = note.mergingNewCaptures(from: notes[index]).migratedToTimeline()
         } else {
             guard note.source == "Note", note.hasContent else { return false }
             notes.insert(note, at: 0)
@@ -126,7 +210,9 @@ final class AppStore: ObservableObject {
     }
 
     func deleteNote(_ note: VoiceNote) {
+        let removed = notes.first { $0.id == note.id }
         notes.removeAll { $0.id == note.id }
+        removed?.captures?.forEach(deleteAttachment)
     }
 
     func togglePin(_ note: VoiceNote) {
@@ -141,7 +227,9 @@ final class AppStore: ObservableObject {
     }
 
     func clearNotes() {
+        let removed = notes
         notes.removeAll()
+        removed.flatMap { $0.captures ?? [] }.forEach(deleteAttachment)
     }
 
     func hasPersistedNote(_ id: UUID) -> Bool {
@@ -171,7 +259,7 @@ final class AppStore: ObservableObject {
                 grouped[index].tags = Array(Set(grouped[index].tags + original.tags)).sorted()
             } else {
                 var daily = original
-                daily.title = original.createdAt.formatted(.dateTime.month(.wide).day().year())
+                daily.title = Self.dayTitle(original.createdAt)
                 daily.cleanedText = original.displayText
                 daily.editedText = original.editedText
                 daily.captures = [original.asCapture]

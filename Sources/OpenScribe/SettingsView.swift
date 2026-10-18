@@ -6,7 +6,7 @@ struct SettingsView: View {
     @State private var microphones: [MicrophoneDevice] = []
     @State private var showClearConfirmation = false
     var section: WorkspaceSection = .general
-    @State private var recordingShortcut = false
+    @State private var recordingAction: ShortcutAction?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -15,7 +15,8 @@ struct SettingsView: View {
             Group {
                 switch section {
                 case .connections: connectionsTab
-                case .personalize: shortcutsTab
+                case .personalize: personalizationTab
+                case .shortcuts: shortcutsTab
                 case .privacy: privacyTab
                 case .permissions: PermissionsView(controller: controller)
                 default: generalTab
@@ -25,11 +26,11 @@ struct SettingsView: View {
         }
         .background(FlowTheme.background)
         .task { microphones = MicrophoneDevice.available() }
-        .onChange(of: section) { _, _ in recordingShortcut = false }
-        .onChange(of: recordingShortcut) { _, active in controller.setShortcutCaptureActive(active) }
+        .onChange(of: section) { _, _ in recordingAction = nil }
+        .onChange(of: recordingAction) { _, action in controller.setShortcutCaptureActive(action != nil) }
         .onDisappear { controller.setShortcutCaptureActive(false) }
         .onChange(of: controller.workspaceSection) { _, next in
-            if !next.isSettings { recordingShortcut = false }
+            if next != .shortcuts { recordingAction = nil }
         }
         .alert("Delete all notes?", isPresented: $showClearConfirmation) {
             Button("Delete all", role: .destructive) { controller.clearNotes(); controller.flash("Note history deleted") }
@@ -58,7 +59,7 @@ struct SettingsView: View {
                         Toggle("Launch at login", isOn: Binding(get: { controller.launchAtLogin }, set: { controller.setLaunchAtLogin($0) }))
                             .labelsHidden().toggleStyle(.switch).disabled(!LoginItem.isAvailable)
                     }
-                    if LoginItem.needsApproval {
+                    if controller.loginItemNeedsApproval {
                         FlowRowDivider()
                         FlowSettingsRow(title: "Approval needed", detail: "Allow OpenScribe in Login Items.") {
                             Button("Open System Settings") { LoginItem.openSystemSettings() }.buttonStyle(.flowSecondary)
@@ -77,45 +78,37 @@ struct SettingsView: View {
                         FlowIconButton(symbol: "arrow.clockwise", help: "Refresh microphones") { microphones = MicrophoneDevice.available() }
                     }
                     FlowRowDivider()
-                    FlowSettingsRow(title: "Dictation mode", detail: controller.settings.dictationMode.detail) {
-                        Picker("Dictation mode", selection: settingBinding(\.dictationMode)) {
-                            ForEach(DictationMode.allCases) { Text($0.title).tag($0) }
-                        }.labelsHidden().frame(width: 170)
-                    }
-                    FlowRowDivider()
-                    FlowSettingsRow(title: "Global shortcut", detail: recordingShortcut ? "Press a modifier and a key, or Globe. Escape cancels." : "Works in any app with Accessibility access") {
-                        if !recordingShortcut { FlowKeycaps(shortcut: controller.settings.shortcutDisplay) }
-                        Button(recordingShortcut ? "Cancel" : "Change") { recordingShortcut.toggle() }.buttonStyle(.flowSecondary)
-                        Menu {
-                            Button("Use Globe") {
-                                controller.updateShortcut(keyCode: 63, modifiers: .function, display: "Globe")
-                                recordingShortcut = false
-                            }
-                            Button("Use Option Space") {
-                                controller.updateShortcut(keyCode: 49, modifiers: .option, display: "⌥ Space")
-                                recordingShortcut = false
-                            }
-                        } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    FlowSettingsRow(title: "Shortcuts", detail: "Dictation, meetings, and screenshots from any app", symbol: "command") {
+                        if let hint = controller.settings.dictationHint { FlowKeycaps(shortcut: hint) }
+                        Button("Edit") { controller.workspaceSection = .shortcuts }.buttonStyle(.flowSecondary)
                     }
                     FlowRowDivider()
                     toggleRow("Paste into the focused app", detail: "Recordings started here are saved to Notes.", symbol: "text.cursor", key: \.pasteIntoFocusedApp)
                 }
-                HotkeyCaptureView(isRecording: $recordingShortcut) { keyCode, modifiers, display in
-                    controller.updateShortcut(keyCode: keyCode, modifiers: modifiers, display: display)
-                    recordingShortcut = false
-                }.frame(width: 0, height: 0)
-                FlowSettingsGroup(title: "Feedback") {
-                    FlowSettingsRow(title: "Flowbar position", symbol: "rectangle.bottomthird.inset.filled") {
-                        Picker("Flowbar position", selection: settingBinding(\.overlayPosition)) {
+                FlowSettingsGroup(title: "Flowbar", footer: "Drag the Flowbar anywhere on screen. It snaps to the center and edges and remembers where you leave it.") {
+                    toggleRow("Keep on screen when idle", detail: "Hover it for dictation, meetings, and screenshots.", symbol: "waveform", key: \.showOverlayWhenIdle)
+                    FlowRowDivider()
+                    FlowSettingsRow(title: "Can’t find it?", symbol: "scope") {
+                        Button("Show me") { controller.revealFlowbar() }.buttonStyle(.flow(.secondary, size: .small))
+                    }
+                    FlowRowDivider()
+                    FlowSettingsRow(title: "Position", symbol: "rectangle.bottomthird.inset.filled") {
+                        Picker("Position", selection: Binding(
+                            get: { controller.settings.flowbarPlacement == nil ? controller.settings.overlayPosition : "custom" },
+                            set: { value in
+                                guard value != "custom" else { return }
+                                controller.updateSettings { $0.overlayPosition = value; $0.flowbarPlacement = nil }
+                            })) {
                             Text("Bottom center").tag("bottom-center")
                             Text("Bottom left").tag("bottom-left")
                             Text("Bottom right").tag("bottom-right")
-                        }.labelsHidden().frame(width: 170)
+                            Text("Top center").tag("top-center")
+                            Text("Top right").tag("top-right")
+                            if controller.settings.flowbarPlacement != nil { Text("Where I placed it").tag("custom") }
+                        }.labelsHidden().frame(width: 180)
                     }
                     FlowRowDivider()
                     toggleRow("Recording sounds", symbol: "speaker.wave.1", key: \.interactionSounds)
-                    FlowRowDivider()
-                    toggleRow("Show Flowbar when idle", symbol: "waveform", key: \.showOverlayWhenIdle)
                 }
             }
             .padding(.horizontal, 32).padding(.vertical, 24)
@@ -194,7 +187,8 @@ struct SettingsView: View {
     private var sectionSubtitle: String {
         switch section {
         case .connections: return "Manage your providers, API keys, and models in one place."
-        case .personalize: return "Your vocabulary, shortcuts, and app preferences."
+        case .personalize: return "Your vocabulary, snippets, and app preferences."
+        case .shortcuts: return "Keys for dictation, meetings, and screenshots."
         case .privacy: return "Choose what stays on this Mac."
         case .permissions: return "Manage the access OpenScribe needs."
         default: return "Appearance, recording, and everyday preferences."
@@ -204,8 +198,90 @@ struct SettingsView: View {
         Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(FlowTheme.inkMuted)
     }
 
-    private var shortcutsTab: some View {
+    private var personalizationTab: some View {
         PersonalizationView(controller: controller)
+    }
+
+    // MARK: - Shortcuts
+
+    private var shortcutsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                if !controller.hotkeyFailures.isEmpty {
+                    FlowBanner(symbol: "exclamationmark.triangle.fill", tint: FlowTheme.warning,
+                               title: "Some shortcuts aren’t active",
+                               detail: shortcutFailureDetail) {
+                        if controller.hotkeyFailures.contains(where: { controller.settings.shortcut(for: $0)?.isGlobe == true }) {
+                            Button("Permissions") { controller.workspaceSection = .permissions }.buttonStyle(.flow(.secondary, size: .small))
+                        }
+                    }
+                }
+                FlowSettingsGroup(title: "Dictation", footer: "A quick tap of the Dictate shortcut keeps recording until you tap again. Hold it to talk, and release to finish.") {
+                    ForEach(Array(ShortcutAction.dictation.enumerated()), id: \.element) { index, action in
+                        if index > 0 { FlowRowDivider() }
+                        shortcutRow(action)
+                    }
+                }
+                FlowSettingsGroup(title: "Meetings & screenshots", footer: "Screenshots are added to today’s note, and text in them becomes searchable. Screen Recording access is required.") {
+                    ForEach(Array(ShortcutAction.capture.enumerated()), id: \.element) { index, action in
+                        if index > 0 { FlowRowDivider() }
+                        shortcutRow(action)
+                    }
+                }
+                HStack {
+                    Text("Shortcuts work in every app and don’t type into it.").font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                    Spacer()
+                    Button("Restore defaults") { recordingAction = nil; controller.resetShortcuts(); controller.flash("Shortcuts restored") }
+                        .buttonStyle(.flowSecondary)
+                }
+                HotkeyCaptureView(isRecording: Binding(get: { recordingAction != nil }, set: { if !$0 { recordingAction = nil } })) { keyCode, modifiers, display in
+                    guard let action = recordingAction else { return }
+                    assign(KeyShortcut(keyCode: keyCode, modifiers: modifiers, display: display), to: action)
+                }.frame(width: 0, height: 0)
+            }
+            .frame(maxWidth: 760).padding(.horizontal, 32).padding(.vertical, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var shortcutFailureDetail: String {
+        let names = controller.hotkeyFailures.map(\.title).joined(separator: ", ")
+        return "\(names). Globe needs Accessibility access; other keys may be taken by another app."
+    }
+
+    private func shortcutRow(_ action: ShortcutAction) -> some View {
+        let shortcut = controller.settings.shortcut(for: action)
+        let recording = recordingAction == action
+        return FlowSettingsRow(title: action.title, detail: recording ? "Press the new shortcut. Escape cancels." : action.detail, symbol: action.symbol) {
+            if recording {
+                Text("Listening…").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.accent)
+            } else if let shortcut {
+                FlowKeycaps(shortcut: shortcut.display)
+                    .opacity(controller.hotkeyFailures.contains(action) ? 0.45 : 1)
+            } else {
+                Text("Not set").font(.system(size: 12)).foregroundStyle(FlowTheme.inkFaint)
+            }
+            Button(recording ? "Cancel" : shortcut == nil ? "Set" : "Change") { recordingAction = recording ? nil : action }
+                .buttonStyle(.flowSecondary)
+            Menu {
+                if action.usesRelease {
+                    Button("Use Globe (fn)") { assign(.globe, to: action) }
+                }
+                if let fallback = ShortcutDefaults.bindings[action] {
+                    Button("Use default (\(fallback.display))") { assign(fallback, to: action) }
+                }
+                Divider()
+                Button("Remove shortcut", role: .destructive) { assign(nil, to: action) }.disabled(shortcut == nil)
+            } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("More options")
+        }
+    }
+
+    private func assign(_ shortcut: KeyShortcut?, to action: ShortcutAction) {
+        recordingAction = nil
+        if let displaced = controller.assignShortcut(shortcut, to: action) {
+            controller.flash("Removed from “\(displaced.title)”")
+        }
     }
 
     // MARK: - Privacy

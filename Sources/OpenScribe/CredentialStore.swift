@@ -73,9 +73,17 @@ enum CredentialStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
 
+    /// Views ask for keys on every redraw, so the decoded file is reused until it changes on disk. Guarded by `lock`.
+    nonisolated(unsafe) private static var cache: (path: String, stamp: [FileAttributeKey: AnyHashable], values: [String: String])?
+
     private static func load(from fileURL: URL) throws -> [String: String] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [:] }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path) else { cache = nil; return [:] }
+        let stamp: [FileAttributeKey: AnyHashable] = [.modificationDate: attributes[.modificationDate] as? Date, .size: attributes[.size] as? NSNumber,
+                                                      .systemFileNumber: attributes[.systemFileNumber] as? NSNumber]
+        if let cache, cache.path == fileURL.path, cache.stamp == stamp { return cache.values }
         let data = try Data(contentsOf: fileURL)
-        return try JSONDecoder().decode([String: String].self, from: data)
+        let values = try JSONDecoder().decode([String: String].self, from: data)
+        cache = (fileURL.path, stamp, values)
+        return values
     }
 }

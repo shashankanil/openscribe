@@ -208,7 +208,8 @@ final class AppStoreTests: XCTestCase {
         let restored = try XCTUnwrap(AppStore(rootURL: root).notes.first)
         XCTAssertEqual(restored.displayText, "")
         XCTAssertEqual(restored.rawText, "Original words")
-        XCTAssertEqual(restored.cleanedText, "Polished words")
+        // The polished transcript stays with the replaced dictation.
+        XCTAssertEqual(restored.captures?.first { $0.entryKind == .dictation }?.text, "Polished words")
     }
 
     func testEmptyManualDraftDoesNotCreateHistory() throws {

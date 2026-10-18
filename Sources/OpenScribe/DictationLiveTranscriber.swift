@@ -6,6 +6,7 @@ final class DictationLiveTranscriber {
     private let transcribe: (URL, AppSettings) async throws -> String
     private var task: Task<Void, Never>?
     private var running = false
+    private var waiting = false
     var onProgress: ((String, Int) -> Void)?
     var onFailure: ((Error) -> Void)?
 
@@ -21,7 +22,11 @@ final class DictationLiveTranscriber {
             guard let self else { return }
             while running, !Task.isCancelled {
                 do {
-                    if try await !processNext(id) { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                    if try await !processNext(id) {
+                        waiting = true
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        waiting = false
+                    }
                 } catch {
                     if !Task.isCancelled { onFailure?(error) }
                     return
@@ -44,6 +49,12 @@ final class DictationLiveTranscriber {
         return true
     }
 
-    func finish() async { running = false; await task?.value; task = nil }
+    /// Returns as soon as any section already being transcribed is done; an idle wait is cut short.
+    func finish() async {
+        running = false
+        if waiting { task?.cancel() }
+        await task?.value
+        task = nil
+    }
     func cancel() { running = false; task?.cancel() }
 }

@@ -79,10 +79,12 @@ struct PermissionsView: View {
         }
         .task {
             while !Task.isCancelled {
-                refresh()
-                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
+                check()
+                do { try await Task.sleep(nanoseconds: 1_500_000_000) } catch { return }
             }
         }
+        .onChange(of: permissions.microphoneStatus) { _, _ in controller.refreshPermissions() }
+        .onChange(of: permissions.accessibilityTrusted) { _, _ in controller.refreshPermissions() }
     }
 
     private func permissionStatus(_ granted: Bool) -> some View {
@@ -91,10 +93,15 @@ struct PermissionsView: View {
     }
 
     private func microphoneAction() {
-        if permissions.microphoneStatus == .notDetermined {
-            requestingMicrophone = true
-            Task { await controller.requestMicrophonePermission(); requestingMicrophone = false }
-        } else { controller.openMicrophoneSettings() }
+        requestingMicrophone = true
+        Task { await controller.requestMicrophonePermission(); requestingMicrophone = false }
+    }
+
+    /// Cheap and quiet: only real changes redraw anything.
+    private func check() {
+        permissions.refresh()
+        let screen = CGPreflightScreenCaptureAccess()
+        if screen != systemAudioReady { systemAudioReady = screen }
     }
 
     private func refresh() {
@@ -102,8 +109,5 @@ struct PermissionsView: View {
         systemAudioReady = CGPreflightScreenCaptureAccess()
     }
 
-    private func openScreenSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
-        NSWorkspace.shared.open(url)
-    }
+    private func openScreenSettings() { PermissionCenter.openPrivacyPane("Privacy_ScreenCapture") }
 }

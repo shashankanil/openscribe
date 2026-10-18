@@ -110,7 +110,8 @@ final class ExperienceRenderingTests: XCTestCase {
     func testMeetingReaderRendersWithIsolatedHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let controller = MeetingController(store: MeetingStore(root: root))
+        let app = AppController(rootURL: root)
+        let controller = app.meetings
         var record = MeetingRecord(title: "Product planning", settings: AppSettings())
         record.status = .ready
         record.duration = 45
@@ -120,7 +121,7 @@ final class ExperienceRenderingTests: XCTestCase {
             .init(id: "m1", track: "microphone", start: 15, duration: 15, text: "Keep the recording controls easy to find."),
             .init(id: "s1", track: "system", start: 15, duration: 15, text: "Then test the installation with a fresh account.")
         ]
-        let view = NSHostingView(rootView: MeetingDetailView(record: record, meetings: controller, onClose: {}).background(FlowTheme.background).environment(\.colorScheme, .light))
+        let view = NSHostingView(rootView: MeetingDetailView(record: record, controller: app, onDeleted: {}).background(FlowTheme.background).environment(\.colorScheme, .light))
         view.appearance = NSAppearance(named: .aqua)
         view.frame = NSRect(x: 0, y: 0, width: 850, height: 700)
         view.layoutSubtreeIfNeeded()
@@ -130,5 +131,6 @@ final class ExperienceRenderingTests: XCTestCase {
         try png.write(to: URL(fileURLWithPath: "/tmp/openscribe-meeting-reader.png"))
         XCTAssertGreaterThan(png.count, 1000)
         XCTAssertTrue(controller.meetings.isEmpty)
+        // The record was never saved, so the reader must not touch the isolated library.
     }
 }

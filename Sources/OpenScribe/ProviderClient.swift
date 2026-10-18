@@ -50,7 +50,11 @@ struct ProviderClient {
         }
         let vocabularyInstruction = settings.customVocabulary.isEmpty
             ? ""
-            : "Preserve these custom words and names exactly when they appear: \(settings.customVocabulary.joined(separator: ", "))."
+            : """
+            The speaker's dictionary: \(settings.customVocabulary.joined(separator: ", ")).
+            Always spell these exactly as listed. If a word in the transcript is clearly a mis-hearing of one of them \
+            (it sounds alike and fits the context), use the dictionary spelling. Leave ordinary words that merely resemble an entry alone.
+            """
         let system = """
         You are the quiet editing layer of a voice dictation app. Clean the transcript without changing meaning.
         Preserve names, numbers, negation, uncertainty, intent, and paragraph breaks.
@@ -93,9 +97,13 @@ struct ProviderClient {
         }
     }
 
-    func transcribeReliably(audioFile: URL, settings: AppSettings, apiKey: String) async throws -> String {
+    func transcribeReliably(audioFile original: URL, settings: AppSettings, apiKey: String) async throws -> String {
+        // Recordings are 48 kHz float; speech models want 16 kHz, so send a file about six times smaller.
+        let compact = SpeechUpload.compact(original)
+        defer { if let compact { try? FileManager.default.removeItem(at: compact) } }
+        let audioFile = compact ?? original
         // A total deadline also bounds providers that upload, create a job, then poll.
-        try await withThrowingTaskGroup(of: String.self) { group in
+        return try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask {
                 try await TranscriptionRetry.run {
                     try await transcribe(audioFile: audioFile, settings: settings, apiKey: apiKey)
@@ -117,10 +125,18 @@ struct ProviderClient {
     ) async throws -> String {
         let endpoint = try url(base: settings.speechBaseURL, path: "/audio/transcriptions")
         let boundary = "OpenScribe-\(UUID().uuidString)"
+        let terms = SpeechHints.terms(settings)
+        if settings.speechProvider == .openRouter, !terms.isEmpty {
+            return try await transcribeOpenRouterWithHints(audioFile: audioFile, settings: settings, apiKey: apiKey, terms: terms, endpoint: endpoint)
+        }
+        var hints: [String: String] = [:]
+        if settings.speechProvider == .mistral { hints["context_bias"] = SpeechHints.contextBias(terms) }
+        else { hints["prompt"] = SpeechHints.prompt(terms) }
         let bodyURL = try makeMultipartBody(
             audioFile: audioFile,
             boundary: boundary,
-            model: settings.speechModel
+            model: settings.speechModel,
+            fields: hints
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
 
@@ -138,6 +154,35 @@ struct ProviderClient {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// OpenRouter's multipart form has no hint fields, so with a dictionary the audio goes as JSON
+    /// and each serving provider receives hints in its own format.
+    private func transcribeOpenRouterWithHints(audioFile: URL, settings: AppSettings, apiKey: String, terms: [String], endpoint: URL) async throws -> String {
+        guard FileManager.default.fileExists(atPath: audioFile.path) else {
+            throw ClientError.audioFile(message: "The recorded audio file is no longer available.")
+        }
+        var options: [String: Any] = [:]
+        if let bias = SpeechHints.contextBias(terms) { options["mistral"] = ["context_bias": bias] }
+        if let prompt = SpeechHints.prompt(terms) {
+            for provider in ["openai", "groq", "fireworks", "deepinfra", "together"] { options[provider] = ["prompt": prompt] }
+        }
+        let body: [String: Any] = [
+            "model": settings.speechModel,
+            "input_audio": ["data": try Data(contentsOf: audioFile).base64EncodedString(), "format": "wav"],
+            "provider": ["options": options],
+        ]
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("https://openscribe.local", forHTTPHeaderField: "HTTP-Referer")
+        request.setValue("OpenScribe", forHTTPHeaderField: "X-Title")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let data = try await send(request)
+        let response = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
+        guard let text = response.text else { throw ClientError.malformedResponse }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func transcribeWithDeepgram(
         audioFile: URL,
         settings: AppSettings,
@@ -150,6 +195,9 @@ struct ProviderClient {
             URLQueryItem(name: "smart_format", value: "true"),
             URLQueryItem(name: "punctuate", value: "true"),
         ]
+        // Nova-3 takes key terms; older models take keywords.
+        let hintName = settings.speechModel.lowercased().hasPrefix("nova-3") ? "keyterm" : "keywords"
+        components?.queryItems? += SpeechHints.terms(settings, limit: 50).map { URLQueryItem(name: hintName, value: $0) }
         guard let endpoint = components?.url else { throw ClientError.invalidURL }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -181,10 +229,10 @@ struct ProviderClient {
         createRequest.httpMethod = "POST"
         createRequest.setValue(apiKey, forHTTPHeaderField: "Authorization")
         createRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        createRequest.httpBody = try JSONSerialization.data(withJSONObject: [
-            "audio_url": upload.uploadURL,
-            "speech_model": settings.speechModel,
-        ])
+        var job: [String: Any] = ["audio_url": upload.uploadURL, "speech_model": settings.speechModel]
+        let terms = SpeechHints.terms(settings)
+        if !terms.isEmpty { job["word_boost"] = terms }
+        createRequest.httpBody = try JSONSerialization.data(withJSONObject: job)
         let createData = try await send(createRequest)
         let created = try JSONDecoder().decode(AssemblyTranscriptResponse.self, from: createData)
 
@@ -265,7 +313,7 @@ struct ProviderClient {
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func makeMultipartBody(audioFile: URL, boundary: String, model: String) throws -> URL {
+    private func makeMultipartBody(audioFile: URL, boundary: String, model: String, fields: [String: String] = [:]) throws -> URL {
         guard FileManager.default.fileExists(atPath: audioFile.path) else {
             throw ClientError.audioFile(message: "The recorded audio file is no longer available.")
         }
@@ -288,6 +336,11 @@ struct ProviderClient {
         output.write(Data("--\(boundary)\r\n".utf8))
         output.write(Data("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".utf8))
         output.write(Data("json\r\n".utf8))
+        for (name, value) in fields.sorted(by: { $0.key < $1.key }) {
+            output.write(Data("--\(boundary)\r\n".utf8))
+            output.write(Data("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8))
+            output.write(Data("\(value)\r\n".utf8))
+        }
         output.write(Data("--\(boundary)\r\n".utf8))
         output.write(Data("Content-Disposition: form-data; name=\"file\"; filename=\"openscribe.wav\"\r\n".utf8))
         output.write(Data("Content-Type: audio/wav\r\n\r\n".utf8))

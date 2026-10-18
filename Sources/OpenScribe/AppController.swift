@@ -9,7 +9,7 @@ final class AppController: ObservableObject {
 
     let store: AppStore
     let recorder: AudioRecorder
-    let hotkey: GlobalHotkey
+    let hotkeys = HotkeyCenter()
     let providerClient: ProviderClient
     let meetings: MeetingController
     let calendar: CalendarMeetingController
@@ -22,6 +22,7 @@ final class AppController: ObservableObject {
         didSet {
             if capturePhase != .recording { captureStartedAt = nil }
             else if oldValue != .recording { captureStartedAt = Date() }
+            hotkeys.setEscapeActive(capturePhase == .recording)
         }
     }
     @Published private(set) var captureStartedAt: Date?
@@ -33,9 +34,21 @@ final class AppController: ObservableObject {
 
     @Published var onboardingVisible = false
     @Published var noticeDetailsVisible = false
-    private var noticePanel: NoticePanel?
+    /// A short notice is popping out of the Flowbar.
+    @Published private(set) var noticeVisible = false
+    /// Cached because the system's login-item lookup is too slow to call from views.
+    @Published private(set) var loginItemNeedsApproval = LoginItem.needsApproval
     private let setupCompletedKey = "setup-completed-v3"
     @Published var workspaceSection: WorkspaceSection = .notes
+    /// Requests from outside a page (Flowbar, menu bar) to show a particular item.
+    @Published var noteFocus: NoteFocus?
+    @Published var focusedMeetingID: UUID?
+    /// A short confirmation shown in the Flowbar, such as after a screenshot.
+    @Published private(set) var flowbarMessage: String?
+    @Published private(set) var screenshotInProgress = false
+    @Published private(set) var hotkeyFailures: [ShortcutAction] = []
+    private var flowbarMessageTask: Task<Void, Never>?
+    private var dictatePressedAt: Date?
     private var overlayPanel: OverlayPanel?
     private var workspaceWindow: NSWindow?
     private var processingTask: Task<Void, Never>?
@@ -48,6 +61,7 @@ final class AppController: ObservableObject {
     private var holdToTalkReleasePending = false
     private var transientErrorTask: Task<Void, Never>?
     @Published private(set) var hasFailedRecording = false
+    @Published private(set) var failedRecordingCount = 0
     private let recovery: DictationRecoveryStore
     private let dataRoot: URL
     private var activeRecoveryJob: DictationJob?
@@ -72,22 +86,27 @@ final class AppController: ObservableObject {
         recovery = DictationRecoveryStore(root: root.appendingPathComponent("DictationRecovery"))
         recorder = AudioRecorder()
         permissions = PermissionCenter()
-        hotkey = GlobalHotkey()
         providerClient = ProviderClient()
         recorder.onInterruption = { [weak self] error in
             guard let self, self.capturePhase == .recording else { return }
             self.finishCapture()
             self.showTransientError("Recording stopped because the microphone was interrupted. Captured audio is kept for transcription or recovery.\n\n\(error.localizedDescription)")
         }
-        meetingSubscription = meetings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        meetingSubscription = meetings.objectWillChange.sink { [weak self] in
+            self?.objectWillChange.send()
+            Task { @MainActor in self?.meetingStateChanged() }
+        }
         calendarSubscription = calendar.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        permissions.onChange = { [weak self] in self?.refreshPermissions() }
         Publishers.Merge(meetings.$error, calendar.$error)
             .removeDuplicates()
             .sink { [weak self] message in
                 guard let message, !message.isEmpty else { return }
                 self?.showTransientError(message)
             }.store(in: &noticeSubscriptions)
-        hasFailedRecording = !recovery.jobs.isEmpty
+        // Recordings whose note was saved before the app stopped are already done.
+        for job in recovery.jobs where store.hasPersistedNote(job.id) { try? recovery.remove(job.id) }
+        refreshRecoveryState()
         store.$storageError.removeDuplicates().sink { [weak self] message in
             if let message { self?.showTransientError(message) }
         }.store(in: &noticeSubscriptions)
@@ -111,13 +130,14 @@ final class AppController: ObservableObject {
 
     private func refreshRecoveryState() {
         hasFailedRecording = !recovery.jobs.isEmpty
+        failedRecordingCount = recovery.jobs.count
     }
 
     var isDictationBusy: Bool { startTask != nil || processingTask != nil || capturePhase == .recording }
 
     var settings: AppSettings { store.settings }
     var notes: [VoiceNote] { store.notes }
-    private var idleHint: String { "\(settings.shortcutDisplay) to speak" }
+    private var idleHint: String { settings.dictationHint.map { "\($0) to speak" } ?? "Click to dictate" }
 
     private func activeApplicationMetadata() -> (name: String?, bundleIdentifier: String?) {
         guard let application = NSWorkspace.shared.frontmostApplication,
@@ -143,10 +163,8 @@ final class AppController: ObservableObject {
             showOnboarding()
         }
         startHotkeyIfAllowed()
-        if store.settings.showOverlayWhenIdle {
-            captureHint = idleHint
-            showOverlay()
-        }
+        captureHint = idleHint
+        refreshOverlay()
     }
 
     private var pasteLastTask: Task<Void, Never>?
@@ -224,7 +242,7 @@ final class AppController: ObservableObject {
 
         lastError = nil
         currentTranscript = ""
-        noticePanel?.orderOut(nil)
+        noticeVisible = false
         transientErrorTask?.cancel()
         transientErrorTask = nil
         captureHint = "Starting…"
@@ -370,7 +388,7 @@ final class AppController: ObservableObject {
         lastError = nil
         capturePhase = .idle
         captureHint = idleHint
-        if !store.settings.showOverlayWhenIdle { hideOverlay() }
+        refreshOverlay()
     }
 
     func retryFailedRecording() {
@@ -394,9 +412,12 @@ final class AppController: ObservableObject {
         } catch { showTransientError(error.localizedDescription) }
     }
 
-    func discardFailedRecording() {
-        guard !isDictationBusy, let job = recovery.jobs.first else { return }
-        do { try recovery.remove(job.id) } catch { showTransientError(error.localizedDescription) }
+    /// Deletes every recording that is waiting to be transcribed.
+    func discardFailedRecordings() {
+        guard !isDictationBusy else { return }
+        for job in recovery.jobs where activeRecoveryJob?.id != job.id {
+            do { try recovery.remove(job.id) } catch { showTransientError(error.localizedDescription) }
+        }
         refreshRecoveryState()
     }
 
@@ -468,9 +489,10 @@ final class AppController: ObservableObject {
 
     func refreshPermissions() {
         permissions.refresh()
-        if launchAtLogin != LoginItem.isRequested { launchAtLogin = LoginItem.isRequested }
+        let requested = LoginItem.isRequested, approval = LoginItem.needsApproval
+        if launchAtLogin != requested { launchAtLogin = requested }
+        if loginItemNeedsApproval != approval { loginItemNeedsApproval = approval }
         startHotkeyIfAllowed()
-        objectWillChange.send()
     }
 
     func requestMicrophonePermission() async {
@@ -495,48 +517,84 @@ final class AppController: ObservableObject {
             showTransientError("OpenScribe could not restart: \(error.localizedDescription)")
         }
     }
+    // Key combinations need no Accessibility access. Globe is re-registered once access is granted.
+    private var hotkeysHaveGlobeAccess = false
+
     private func startHotkeyIfAllowed() {
-        guard permissions.accessibilityTrusted, !shortcutCaptureActive else { return }
-        if !hotkeyStarted {
+        guard !shortcutCaptureActive else { return }
+        if !hotkeyStarted || hotkeysHaveGlobeAccess != permissions.accessibilityTrusted {
             hotkeyStarted = true
             configureHotkey()
         }
     }
 
     private func configureHotkey() {
-        let settings = store.settings
-        let modifiers = NSEvent.ModifierFlags(rawValue: settings.shortcutModifiers)
-        let releaseToSend = settings.dictationMode == .holdToTalk || settings.shortcutKeyCode == 63
-        let onPress: () -> Void = releaseToSend
-            ? { [weak self] in self?.startCapture() }
-            : { [weak self] in self?.toggleCapture() }
-        let onRelease: (() -> Void)? = releaseToSend
-            ? { [weak self] in self?.finishCapture() }
-            : nil
-
-        hotkey.start(
-            keyCode: settings.shortcutKeyCode,
-            modifiers: modifiers,
-            onPress: onPress,
-            onRelease: onRelease
-        )
+        hotkeysHaveGlobeAccess = permissions.accessibilityTrusted
+        var bindings: [ShortcutAction: KeyShortcut] = [:]
+        for action in ShortcutAction.allCases { bindings[action] = settings.shortcut(for: action) }
+        hotkeys.onEscape = { [weak self] in self?.cancelCapture() }
+        hotkeys.start(bindings: bindings, globeAllowed: hotkeysHaveGlobeAccess,
+                      onPress: { [weak self] in self?.shortcutPressed($0) },
+                      onRelease: { [weak self] in self?.shortcutReleased($0) })
+        hotkeyFailures = hotkeys.failures
     }
-
 
     func restartHotkey() {
         guard hotkeyStarted else { return }
         configureHotkey()
     }
+
     func setShortcutCaptureActive(_ active: Bool) {
         shortcutCaptureActive = active
-        if active { hotkey.stop(); hotkeyStarted = false }
+        if active { hotkeys.stop(); hotkeyStarted = false }
         else { startHotkeyIfAllowed() }
     }
-    func updateShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String) {
+
+    /// Returns the action that lost this shortcut, if it was already in use.
+    @discardableResult
+    func assignShortcut(_ shortcut: KeyShortcut?, to action: ShortcutAction) -> ShortcutAction? {
+        var displaced: ShortcutAction?
+        updateSettings { displaced = $0.assign(shortcut, to: action) }
+        return displaced
+    }
+
+    func resetShortcuts() {
         updateSettings {
-            $0.shortcutKeyCode = keyCode
-            $0.shortcutModifiers = modifiers.rawValue
-            $0.shortcutDisplay = display
+            $0.shortcuts = Dictionary(uniqueKeysWithValues: ShortcutDefaults.bindings.map { ($0.key.rawValue, $0.value) })
+            $0.syncLegacyShortcut()
+        }
+    }
+
+    // A quick tap of the dictate key keeps recording; holding it records until release.
+    private static let holdThreshold: TimeInterval = 0.35
+
+    private func shortcutPressed(_ action: ShortcutAction) {
+        switch action {
+        case .dictate:
+            if capturePhase == .recording || startTask != nil {
+                dictatePressedAt = nil
+                toggleCapture()
+            } else if capturePhase != .transcribing && capturePhase != .cleaning {
+                dictatePressedAt = Date()
+                startCapture()
+            }
+        case .holdToTalk: startCapture()
+        case .meeting: toggleMeeting()
+        case .screenshotArea: takeScreenshot(.area)
+        case .screenshotWindow: takeScreenshot(.window)
+        case .screenshotScreen: takeScreenshot(.screen)
+        case .pasteLast: pasteLastDictation()
+        }
+    }
+
+    private func shortcutReleased(_ action: ShortcutAction) {
+        switch action {
+        case .dictate:
+            guard let pressed = dictatePressedAt else { return }
+            dictatePressedAt = nil
+            if Date().timeIntervalSince(pressed) >= Self.holdThreshold { finishCapture() }
+        case .holdToTalk: finishCapture()
+        default: break
         }
     }
 
@@ -549,6 +607,7 @@ final class AppController: ObservableObject {
         do { try LoginItem.setEnabled(enabled) }
         catch { showTransientError(error.localizedDescription) }
         launchAtLogin = LoginItem.isRequested
+        loginItemNeedsApproval = LoginItem.needsApproval
     }
 
     /// Short confirmation inside the main window.
@@ -566,7 +625,8 @@ final class AppController: ObservableObject {
     func dismissNotice() {
         transientErrorTask?.cancel()
         transientErrorTask = nil
-        noticePanel?.orderOut(nil)
+        noticeVisible = false
+        refreshOverlay()
     }
 
     func openSettings() {
@@ -586,23 +646,19 @@ final class AppController: ObservableObject {
     @discardableResult
     func updateSettings(_ update: (inout AppSettings) -> Void) -> Bool {
         var updated = store.settings
-        let previousDictationMode = updated.dictationMode
-        let previousShortcutKeyCode = updated.shortcutKeyCode
-        let previousShortcutModifiers = updated.shortcutModifiers
-        let previousTheme = updated.theme
+        let previous = updated
         update(&updated)
         guard store.saveSettings(updated) else { objectWillChange.send(); return false }
-        if previousTheme != updated.theme {
+        if previous.theme != updated.theme {
             applyTheme(updated.theme)
         }
-        if updated.showOverlayWhenIdle || isDictationBusy { showOverlay() }
-        else { hideOverlay() }
-        objectWillChange.send()
-        if previousDictationMode != updated.dictationMode
-            || previousShortcutKeyCode != updated.shortcutKeyCode
-            || previousShortcutModifiers != updated.shortcutModifiers {
-            restartHotkey()
+        if previous.showOverlayWhenIdle != updated.showOverlayWhenIdle || previous.overlayPosition != updated.overlayPosition
+            || previous.flowbarPlacement != updated.flowbarPlacement {
+            refreshOverlay(reposition: true)
         }
+        if capturePhase == .idle { captureHint = idleHint }
+        objectWillChange.send()
+        if previous.shortcuts != updated.shortcuts { restartHotkey() }
         return true
     }
 
@@ -663,6 +719,28 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Asks the classifier about a possible spoken correction. Any failure keeps the transcript as it was.
+    private func resolveSpokenCorrections(_ text: String, settings: AppSettings, apiKey: String) async -> SpokenCorrection.Outcome {
+        let unchanged = SpokenCorrection.Outcome(text: text, learned: [])
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return unchanged }
+        let client = providerClient
+        let edits: [SpokenCorrection.Edit]? = await withTaskGroup(of: [SpokenCorrection.Edit]?.self) { group in
+            group.addTask { try? await SpokenCorrection.classify(text, vocabulary: settings.customVocabulary, settings: settings, apiKey: apiKey, client: client) }
+            group.addTask { try? await Task.sleep(nanoseconds: 8_000_000_000); return nil }
+            defer { group.cancelAll() }
+            return await group.next() ?? nil
+        }
+        return edits.map { SpokenCorrection.apply($0, to: text) } ?? unchanged
+    }
+
+    /// Adds spelled-out words to the vocabulary. Returns what to tell the user.
+    private func learn(_ words: [String]) -> String? {
+        let new = words.filter { word in !settings.customVocabulary.contains { $0.caseInsensitiveCompare(word) == .orderedSame } }
+        guard !new.isEmpty else { return nil }
+        updateSettings { $0.customVocabulary += new }
+        return "Added " + new.map { "“\($0)”" }.joined(separator: ", ") + " to your dictionary"
+    }
+
     private func processRecording(
         recording: RecordedAudio,
         sourceApplication: String?,
@@ -721,7 +799,18 @@ final class AppController: ObservableObject {
                 currentTranscript = raw
 
                 let snippet = VoiceSnippet.expansion(for: raw, snippets: speechSettings.snippets)
-                let corrected = CorrectionRule.apply(to: raw, rules: speechSettings.correctionRules)
+                var corrected = DictionaryPass.apply(to: CorrectionRule.apply(to: raw, rules: speechSettings.correctionRules),
+                                                     vocabulary: speechSettings.customVocabulary, isCommonWord: DictionaryPass.systemKnows)
+                var learned: [String] = []
+                if snippet == nil, speechSettings.spokenCorrections, SpokenCorrection.mightContainCorrection(corrected) {
+                    capturePhase = .cleaning
+                    captureHint = "Checking corrections…"
+                    showOverlay()
+                    let outcome = await resolveSpokenCorrections(corrected, settings: speechSettings, apiKey: languageKey)
+                    try Task.checkCancellation()
+                    corrected = outcome.text
+                    learned = outcome.learned
+                }
                 var cleaned = snippet ?? corrected
                 var cleanupFailure: Error?
                 if speechSettings.cleanupEnabled && snippet == nil {
@@ -775,6 +864,8 @@ final class AppController: ObservableObject {
 
                 if let cleanupFailure {
                     showTransientError("Transcript saved; cleanup unavailable: \(cleanupFailure.localizedDescription)")
+                } else if speechSettings.learnSpelledWords, let message = learn(learned) {
+                    showInfoNotice(message)
                 }
 
                 if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible && sourceBundleIdentifier != nil {
@@ -801,7 +892,7 @@ final class AppController: ObservableObject {
                         guard let self, self.captureGeneration == generation, self.capturePhase == .ready else { return }
                         self.capturePhase = .idle
                         self.captureHint = self.idleHint
-                        if !self.settings.showOverlayWhenIdle { self.hideOverlay() }
+                        self.refreshOverlay()
                         self.readyTask = nil
                     }
                 }
@@ -830,25 +921,51 @@ final class AppController: ObservableObject {
         NSLog("OpenScribe capture failed: %@", error.localizedDescription)
         capturePhase = .idle
         captureHint = idleHint
-        if !settings.showOverlayWhenIdle { hideOverlay() }
+        refreshOverlay()
         showTransientError(error.localizedDescription)
     }
 
     private func showTransientError(_ message: String) {
         transientErrorTask?.cancel()
+        infoNotice = nil
         lastError = message.isEmpty ? "Something went wrong." : message
-        if noticePanel == nil { noticePanel = NoticePanel(controller: self) }
-        noticePanel?.show()
+        noticeVisible = true
+        refreshOverlay()
         transientErrorTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
-            self?.noticePanel?.orderOut(nil)
+            do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            self?.noticeVisible = false
             self?.transientErrorTask = nil
+            self?.refreshOverlay()
+        }
+    }
+
+    /// Good news from the pill, such as a word added to the dictionary. Clicking it opens Personalization.
+    @Published private(set) var infoNotice: String?
+
+    func showInfoNotice(_ message: String) {
+        transientErrorTask?.cancel()
+        infoNotice = message
+        noticeVisible = true
+        refreshOverlay()
+        transientErrorTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 4_000_000_000) } catch { return }
+            self?.noticeVisible = false
+            self?.infoNotice = nil
+            self?.transientErrorTask = nil
+            self?.refreshOverlay()
         }
     }
 
     func inspectNotice(_ message: String? = nil) {
+        if message == nil, infoNotice != nil {
+            infoNotice = nil
+            dismissNotice()
+            open(.personalize)
+            return
+        }
         if let message { lastError = message }
-        noticePanel?.orderOut(nil)
+        noticeVisible = false
+        refreshOverlay()
         openMainWindow()
         noticeDetailsVisible = true
     }
@@ -860,12 +977,227 @@ final class AppController: ObservableObject {
         overlayPanel?.show()
     }
 
-    private func hideOverlay() {
-        overlayPanel?.orderOut(nil)
+    /// The Flowbar is visible while anything is happening, and when idle if the user keeps it on screen.
+    var flowbarNeeded: Bool {
+        settings.showOverlayWhenIdle || isDictationBusy || capturePhase == .ready || meetings.occupiesCapture || flowbarMessage != nil
+            || noticeVisible || meetings.shortMeeting != nil
     }
+
+    /// Answers to "this meeting was very short; was it a mistake?", asked from the pill.
+    func resolveShortMeeting(summarize: Bool? = nil, delete: Bool = false) {
+        guard let id = meetings.shortMeeting else { return }
+        if delete {
+            do { try deleteMeeting(id) } catch { showTransientError(error.localizedDescription) }
+        } else if summarize == true {
+            meetings.summarizeShortMeeting(id)
+        } else {
+            meetings.skipSummary(id)
+        }
+        refreshOverlay()
+    }
+
+    func refreshOverlay(reposition: Bool = false) {
+        guard !screenshotInProgress else { return }
+        if flowbarNeeded {
+            if reposition { overlayPanel?.resetPlacement() }
+            showOverlay()
+        } else {
+            overlayPanel?.orderOut(nil)
+        }
+    }
+
+    /// Keeps the Flowbar on screen and opens it briefly so it's easy to find.
+    func revealFlowbar() {
+        if !settings.showOverlayWhenIdle { updateSettings { $0.showOverlayWhenIdle = true } }
+        refreshOverlay()
+        overlayPanel?.model.reveal()
+    }
+
+    func hideFlowbar() {
+        updateSettings { $0.showOverlayWhenIdle = false }
+        refreshOverlay()
+    }
+
+    func saveFlowbarPlacement(_ placement: FlowbarPlacement?) {
+        var updated = store.settings
+        updated.flowbarPlacement = placement
+        _ = store.saveSettings(updated)
+        objectWillChange.send()
+    }
+
+    private func flashFlowbar(_ message: String) {
+        flowbarMessageTask?.cancel()
+        flowbarMessage = message
+        refreshOverlay()
+        flowbarMessageTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_600_000_000) } catch { return }
+            self?.flowbarMessage = nil
+            self?.refreshOverlay()
+        }
+    }
+
+    // MARK: - Meetings
+
+    var canStartMeeting: Bool { meetings.activeID == nil && !meetings.isBusy && !isDictationBusy }
+
+    func toggleMeeting() {
+        if meetings.activeID != nil { meetings.finish() } else { startMeeting() }
+    }
+
+    /// Starts immediately with the saved sources. The meeting can be renamed afterwards.
+    func startMeeting(title: String = "") {
+        guard !isDictationBusy else {
+            showTransientError("Finish your dictation before starting a meeting.")
+            return
+        }
+        guard meetings.activeID == nil, !meetings.isBusy else { return }
+        permissions.refresh()
+        guard !credential(for: .speech).isEmpty || !(settings.meetingLiveTranscription || settings.meetingSummarize) else {
+            showOnboarding()
+            return
+        }
+        meetings.start(title: title, microphone: settings.meetingMicrophone || !settings.meetingSystemAudio,
+                       systemAudio: settings.meetingSystemAudio, settings: settings,
+                       summarizeOnStop: settings.meetingSummarize, liveTranscription: settings.meetingLiveTranscription)
+        if meetings.activeID != nil, settings.interactionSounds { sounds.play(.start) }
+    }
+
+    // MARK: - Meeting notes window
+
+    private var meetingNotesPanel: MeetingNotesPanel?
+
+    /// A small floating notes window for the running meeting. Closing it leaves the meeting recording.
+    func showMeetingNotes() {
+        guard let id = meetings.activeID else { return }
+        if let panel = meetingNotesPanel, panel.meetingID == id {
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
+        meetingNotesPanel?.close()
+        let panel = MeetingNotesPanel(controller: self, meetingID: id)
+        panel.onClose = { [weak self, weak panel] in
+            if self?.meetingNotesPanel === panel { self?.meetingNotesPanel = nil }
+        }
+        meetingNotesPanel = panel
+        if let origin = overlayPanel?.companionOrigin(for: panel.frame.size, gap: 10) { panel.setFrameOrigin(origin) } else { panel.center() }
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    func closeMeetingNotes() {
+        meetingNotesPanel?.close()
+    }
+
+    func openMeeting(_ id: UUID?) {
+        focusedMeetingID = id
+        open(.meetings)
+    }
+
+    func openDayNote(_ date: Date = Date()) {
+        noteFocus = Calendar.current.isDateInToday(date) ? NoteFocus(target: .today) : store.dayNote(for: date).map { NoteFocus(target: .note($0.id)) }
+        open(.notes)
+    }
+
+    func openNote(_ id: UUID) {
+        noteFocus = NoteFocus(target: .note(id))
+        open(.notes)
+    }
+
+    private var linkedMeetingID: UUID?
+
+    /// Keeps the Flowbar in step with meetings and links each new meeting into its day note.
+    private func meetingStateChanged() {
+        if let id = meetings.activeID, linkedMeetingID != id {
+            linkedMeetingID = id
+            let linked = store.notes.contains { $0.captures?.contains { $0.meetingID == id && $0.entryKind == .meeting } == true }
+            if !linked, let record = meetings.store.record(id) {
+                store.addCapture(NoteCapture(id: UUID(), createdAt: record.createdAt, title: record.title, rawText: "", text: "",
+                                             duration: 0, sourceApplication: nil, sourceBundleIdentifier: nil,
+                                             kind: .meeting, meetingID: id))
+            }
+        } else if meetings.activeID == nil {
+            linkedMeetingID = nil
+            closeMeetingNotes()
+        }
+        refreshOverlay()
+    }
+
+    func deleteMeeting(_ id: UUID) throws {
+        if meetings.shortMeeting == id { meetings.skipSummary(id); dismissNotice() }
+        try meetings.store.delete(id)
+        store.removeMeetingEntries(id)
+        objectWillChange.send()
+    }
+
+    // MARK: - Screenshots
+
+    func takeScreenshot(_ kind: ScreenshotKind) {
+        guard !screenshotInProgress else { return }
+        let source = activeApplicationMetadata()
+        // During a meeting, screenshots also join that meeting's notes.
+        let meetingID = meetings.isRecording || meetings.isPaused ? meetings.activeID : nil
+        let name = "Screenshot-\(UUID().uuidString).png"
+        let url = store.attachmentURL(name)
+        screenshotInProgress = true
+        overlayPanel?.orderOut(nil)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { screenshotInProgress = false; refreshOverlay() }
+            do {
+                // Let the Flowbar leave the screen before a full-screen capture.
+                if kind == .screen { try? await Task.sleep(nanoseconds: 120_000_000) }
+                guard try await ScreenshotCapture.capture(kind, to: url, playSound: settings.interactionSounds) else { return }
+                var capture = NoteCapture(id: UUID(), createdAt: Date(), title: "", rawText: "", text: "", duration: 0,
+                                          sourceApplication: source.name, sourceBundleIdentifier: source.bundleIdentifier,
+                                          kind: .screenshot, attachment: name, meetingID: meetingID)
+                let note = store.addCapture(capture)
+                objectWillChange.send()
+                flashFlowbar(meetingID == nil ? "Added to today" : "Added to meeting")
+                if let text = await ScreenshotCapture.recognizeText(in: url) {
+                    capture.recognizedText = text
+                    store.updateCapture(capture, in: note.id)
+                    objectWillChange.send()
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: url)
+                showTransientError(error.localizedDescription)
+                if case ScreenshotError.permissionNeeded = error { showPermissions() }
+            }
+        }
+    }
+
+    func updateCapture(_ capture: NoteCapture, in noteID: UUID) -> Bool {
+        let saved = store.updateCapture(capture, in: noteID)
+        objectWillChange.send()
+        return saved
+    }
+
+    func removeCapture(_ captureID: UUID, from noteID: UUID) {
+        store.removeCapture(captureID, from: noteID)
+        objectWillChange.send()
+    }
+
+    /// Adds a written entry to a day's timeline.
+    @discardableResult
+    func addDayEntry(_ text: String, on date: Date = Date()) -> VoiceNote? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let createdAt = Calendar.current.isDateInToday(date) ? Date() : (store.dayNote(for: date)?.lastCapturedAt ?? date)
+        let note = store.addCapture(NoteCapture(id: UUID(), createdAt: createdAt, title: "", rawText: "", text: trimmed, duration: 0,
+                                                sourceApplication: nil, sourceBundleIdentifier: nil, kind: .text))
+        objectWillChange.send()
+        return note
+    }
+}
+
+/// A one-off request to show something in Notes. Each request is distinct, even for the same target.
+struct NoteFocus: Equatable {
+    enum Target: Equatable { case today, note(UUID) }
+    let id = UUID()
+    var target: Target
 }
 
 enum CredentialKey: String {
     case speech = "speech-api-key"
     case languageModel = "language-model-api-key"
 }
+

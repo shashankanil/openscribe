@@ -62,6 +62,12 @@ struct MeetingRecord: Codable, Identifiable {
     var lastError: String?
     var microphoneLabel = "Microphone"
     var systemLabel = "System audio"
+    /// What the user wrote during or after the meeting.
+    var userNotes: String?
+    /// The transcript was too short to summarize automatically; waiting for the user to decide.
+    var summaryNeedsConfirmation: Bool?
+
+    var wordCount: Int { segments.reduce(0) { $0 + $1.text.split(whereSeparator: \.isWhitespace).count } }
 
     var transcript: String {
         MeetingTranscript.passages(segments).map {
@@ -70,6 +76,9 @@ struct MeetingRecord: Codable, Identifiable {
     }
     var markdown: String {
         var result = "# \(title)\n\n\(createdAt.formatted())\n\n"
+        if let notes = userNotes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
+            result += "## My notes\n\n\(notes)\n\n"
+        }
         if let summary {
             for (heading, points) in [("Summary", summary.overview), ("Decisions", summary.decisions), ("Action items", summary.actions)] {
                 result += "## \(heading)\n\n"
@@ -88,7 +97,7 @@ extension MeetingRecord {
     private enum CodingKeys: String, CodingKey {
         case id, title, createdAt, duration, status, summarizeOnStop, liveTranscription
         case includesMicrophone, includesSystemAudio, settings, segments, summary
-        case recoveryNotice, lastError, microphoneLabel, systemLabel
+        case recoveryNotice, lastError, microphoneLabel, systemLabel, userNotes, summaryNeedsConfirmation
     }
 
     init(from decoder: Decoder) throws {
@@ -109,6 +118,8 @@ extension MeetingRecord {
         lastError = try values.decodeIfPresent(String.self, forKey: .lastError)
         microphoneLabel = try values.decodeIfPresent(String.self, forKey: .microphoneLabel) ?? "Microphone"
         systemLabel = try values.decodeIfPresent(String.self, forKey: .systemLabel) ?? "System audio"
+        userNotes = try values.decodeIfPresent(String.self, forKey: .userNotes)
+        summaryNeedsConfirmation = try values.decodeIfPresent(Bool.self, forKey: .summaryNeedsConfirmation)
     }
 }
 

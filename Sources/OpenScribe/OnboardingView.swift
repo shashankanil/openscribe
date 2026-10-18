@@ -67,12 +67,18 @@ struct OnboardingView: View {
             if keySaved { step = controller.setupReadiness.canDictate ? 3 : 2 }
             launchAtLogin = controller.launchAtLogin || !controller.hasCompletedSetup
         }
-        .task {
+        // Only the access step needs to watch System Settings; the check is cheap and publishes only real changes.
+        .task(id: step) {
+            guard step == 2 else { return }
             while !Task.isCancelled {
-                controller.refreshPermissions()
-                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                permissions.refresh()
+                do { try await Task.sleep(nanoseconds: 700_000_000) } catch { return }
             }
         }
+        .onChange(of: permissions.microphoneStatus) { _, _ in controller.refreshPermissions() }
+        .onChange(of: permissions.accessibilityTrusted) { _, _ in controller.refreshPermissions() }
+        // The shortcut works here too, so a practice run can start without the button.
+        .onChange(of: controller.capturePhase) { _, phase in if phase == .recording { attemptedPractice = true } }
     }
 
     private var keySaved: Bool { !controller.credential(for: .speech).isEmpty }
@@ -120,10 +126,8 @@ struct OnboardingView: View {
                     if permissions.microphoneReady { FlowBadge(text: "Allowed", color: FlowTheme.success, symbol: "checkmark") }
                     else {
                         Button(working ? "Waiting…" : permissions.microphoneStatus == .notDetermined ? "Allow" : "Open Settings") {
-                            if permissions.microphoneStatus == .notDetermined {
-                                working = true
-                                Task { await controller.requestMicrophonePermission(); working = false }
-                            } else { controller.openMicrophoneSettings() }
+                            working = true
+                            Task { await controller.requestMicrophonePermission(); working = false }
                         }.buttonStyle(.flowSecondary).disabled(working)
                     }
                 }
@@ -132,6 +136,10 @@ struct OnboardingView: View {
                     if permissions.accessibilityTrusted { FlowBadge(text: "Allowed", color: FlowTheme.success, symbol: "checkmark") }
                     else { Button("Open Settings") { controller.openAccessibilitySettings() }.buttonStyle(.flowSecondary) }
                 }
+            }
+            if permissions.microphoneNeedsSettings {
+                Text("Turn on OpenScribe under Microphone in System Settings, then come back. This screen updates automatically.")
+                    .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
             }
             if !permissions.accessibilityTrusted {
                 Text("Enable OpenScribe in Accessibility, then return here. This screen updates automatically.")
@@ -163,7 +171,13 @@ struct OnboardingView: View {
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(FlowTheme.surfaceMuted, in: RoundedRectangle(cornerRadius: 10))
             }
-            HStack { FlowKeycaps(shortcut: controller.settings.shortcutDisplay); Text("Your shortcut. Change it in Settings.").font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted) }
+            if let hint = controller.settings.dictationHint {
+                HStack {
+                    FlowKeycaps(shortcut: hint)
+                    Text("Or use the shortcut: tap to start and stop, or hold to talk. Change it in Shortcuts.")
+                        .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                }
+            }
             if LoginItem.isAvailable {
                 Toggle("Launch OpenScribe when I log in", isOn: $launchAtLogin).toggleStyle(.switch).font(.system(size: 13))
             }

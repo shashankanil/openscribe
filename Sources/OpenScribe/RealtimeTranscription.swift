@@ -105,7 +105,9 @@ actor RealtimeTranscription {
             try await expect("session.updated")
         case .openAI:
             try await expect("session.created")
-            try await sendJSON(["type": "session.update", "session": ["type": "transcription", "audio": ["input": ["format": ["type": "audio/pcm", "rate": 24000], "transcription": ["model": capability.model], "turn_detection": NSNull()]]]])
+            var transcription: [String: Any] = ["model": capability.model]
+            if let prompt = SpeechHints.prompt(capability.terms) { transcription["prompt"] = prompt }
+            try await sendJSON(["type": "session.update", "session": ["type": "transcription", "audio": ["input": ["format": ["type": "audio/pcm", "rate": 24000], "transcription": transcription, "turn_detection": NSNull()]]]])
             try await expect("session.updated")
         case .assemblyAI: try await expect("Begin")
         case .deepgram: break

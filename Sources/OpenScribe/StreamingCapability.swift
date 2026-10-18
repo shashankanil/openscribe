@@ -9,6 +9,8 @@ struct StreamingCapability: Equatable {
     let endpoint: URL
     let sampleRate: Double
     let fallbackModel: String
+    /// Dictionary words sent as spelling hints, where the realtime API takes them.
+    var terms: [String] = []
 
     static func models(for provider: SpeechProvider) -> [String] {
         switch provider {
@@ -54,7 +56,8 @@ struct StreamingCapability: Equatable {
             fallback = "best"
         default: return nil
         }
-        return Self(transport: transport, model: model, endpoint: URL(string: endpoint)!, sampleRate: rate, fallbackModel: fallback)
+        return Self(transport: transport, model: model, endpoint: URL(string: endpoint)!, sampleRate: rate, fallbackModel: fallback,
+                    terms: SpeechHints.terms(settings, limit: 50))
     }
 
     static func description(for settings: AppSettings) -> String {
@@ -73,8 +76,12 @@ struct StreamingCapability: Equatable {
         case .mistral: parts.queryItems = [.init(name: "model", value: model)]
         case .deepgram:
             parts.queryItems = ["model": model, "encoding": "linear16", "sample_rate": "16000", "channels": "1", "interim_results": "true", "smart_format": "true"].map { .init(name: $0.key, value: $0.value) }
+            parts.queryItems! += terms.map { .init(name: model.hasPrefix("nova-3") ? "keyterm" : "keywords", value: $0) }
         case .assemblyAI:
             parts.queryItems = ["speech_model": model, "sample_rate": "16000", "encoding": "pcm_s16le", "format_turns": "true"].map { .init(name: $0.key, value: $0.value) }
+            if !terms.isEmpty, let json = try? JSONSerialization.data(withJSONObject: terms) {
+                parts.queryItems!.append(.init(name: "keyterms_prompt", value: String(decoding: json, as: UTF8.self)))
+            }
         }
         var request = URLRequest(url: parts.url!)
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -67,6 +67,7 @@ final class StatusBarController: NSObject {
             status.isEnabled = false
             menu.addItem(status)
             menu.addItem(.separator())
+            menu.addItem(action("Today’s note", #selector(openToday)))
             menu.addItem(action("Open OpenScribe", #selector(openWorkspace)))
             menu.addItem(action("Meetings", #selector(openMeetings)))
             menu.addItem(action("Settings…", #selector(openSettings)))
@@ -87,9 +88,23 @@ final class StatusBarController: NSObject {
             if controller.calendar.trackedTitle != nil {
                 menu.addItem(action("Not happening — stop without transcribing", #selector(declineCalendar)))
             }
-            if controller.meetings.activeID != nil {
-                menu.addItem(action("Finish meeting", #selector(finishMeeting)))
+            let meeting = action(controller.meetings.activeID != nil ? "Finish meeting" : "Start meeting", #selector(toggleMeeting))
+            meeting.isEnabled = controller.meetings.activeID != nil ? !controller.meetings.isBusy : controller.canStartMeeting
+            menu.addItem(meeting)
+            let screenshots = NSMenuItem(title: "Screenshot to today", action: nil, keyEquivalent: "")
+            let kinds = NSMenu()
+            for (index, kind) in ScreenshotKind.allCases.enumerated() {
+                let entry = action(kind.title, #selector(screenshot(_:)))
+                entry.tag = index
+                kinds.addItem(entry)
             }
+            screenshots.submenu = kinds
+            menu.addItem(screenshots)
+            menu.addItem(.separator())
+            let flowbar = action("Keep Flowbar on screen", #selector(toggleFlowbar))
+            flowbar.state = controller.settings.showOverlayWhenIdle ? .on : .off
+            menu.addItem(flowbar)
+            menu.addItem(action("Show me the Flowbar", #selector(revealFlowbar)))
             menu.addItem(.separator())
             menu.addItem(action("Quit OpenScribe", #selector(quit)))
             item.menu = menu
@@ -120,20 +135,22 @@ final class StatusBarController: NSObject {
     @objc private func pasteLast() { controller.pasteLastDictation() }
     @objc private func retry() { controller.retryFailedRecording() }
     @objc private func declineCalendar() { controller.calendar.decline() }
-    @objc private func finishMeeting() { controller.meetings.finish() }
+    @objc private func toggleMeeting() { controller.toggleMeeting() }
+    @objc private func openToday() { controller.openDayNote() }
+    @objc private func screenshot(_ sender: NSMenuItem) { controller.takeScreenshot(ScreenshotKind.allCases[sender.tag]) }
+    @objc private func revealFlowbar() { controller.revealFlowbar() }
+    @objc private func toggleFlowbar() { controller.updateSettings { $0.showOverlayWhenIdle.toggle() } }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
 
 struct QuickPanelView: View {
     @ObservedObject var controller: AppController
-    @ObservedObject private var recorder: AudioRecorder
     let close: () -> Void
     @State private var copiedID: UUID?
 
     init(controller: AppController, close: @escaping () -> Void) {
         self.controller = controller
-        recorder = controller.recorder
         self.close = close
     }
 
@@ -155,7 +172,9 @@ struct QuickPanelView: View {
             }
             if controller.meetings.occupiesCapture {
                 FlowBanner(symbol: "person.2.wave.2", tint: FlowTheme.recording, title: controller.meetings.isPaused ? "Meeting paused" : "Recording a meeting") {
-                    Button("Open") { close(); controller.open(.meetings) }.buttonStyle(.flow(.secondary, size: .small))
+                    Button("Open") { close(); controller.openMeeting(controller.meetings.activeID) }.buttonStyle(.flow(.secondary, size: .small))
+                    Button("Stop") { close(); controller.meetings.finish() }.buttonStyle(.flow(.destructive, size: .small))
+                        .disabled(controller.meetings.isBusy)
                 }
             } else if !controller.setupReadiness.canDictate && !controller.isDictationBusy {
                 Text("Connect a provider and allow the microphone to start.").font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
@@ -163,7 +182,9 @@ struct QuickPanelView: View {
             } else {
                 if recording || processing {
                     HStack {
-                        FlowWaveform(levels: recorder.inputLevels, color: recording ? FlowTheme.recording : FlowTheme.accent, maxHeight: 24, animated: processing)
+                        RecorderSquiggle(recorder: controller.recorder, color: recording ? FlowTheme.recording : FlowTheme.accent,
+                                         motion: recording ? .live : .flowing)
+                            .frame(width: 72, height: 20)
                         Spacer()
                         if recording {
                             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -181,7 +202,22 @@ struct QuickPanelView: View {
                     Label(recording ? "Stop & save" : processing ? controller.captureHint : "Start dictation", systemImage: recording ? "stop.fill" : "mic.fill")
                 }.buttonStyle(.flow(.primary, size: .large, fullWidth: true)).disabled(processing || controller.isDictationBusy && !recording)
                 if !recording && !processing {
-                    HStack { FlowKeycaps(shortcut: controller.settings.shortcutDisplay); Text("in any app").font(.system(size: 11)).foregroundStyle(FlowTheme.inkMuted) }.frame(maxWidth: .infinity)
+                    HStack(spacing: 8) {
+                        Button { close(); controller.startMeeting() } label: { Label("Meeting", systemImage: "person.2.wave.2") }
+                            .buttonStyle(.flow(.secondary, fullWidth: true)).disabled(!controller.canStartMeeting)
+                        Menu {
+                            ForEach(ScreenshotKind.allCases, id: \.self) { kind in
+                                Button(kind.title) { close(); controller.takeScreenshot(kind) }
+                            }
+                        } label: { Label("Screenshot", systemImage: "camera.viewfinder") } primaryAction: {
+                            close(); controller.takeScreenshot(.area)
+                        }
+                        .menuStyle(.button).buttonStyle(.flow(.secondary, fullWidth: true))
+                    }
+                    if let hint = controller.settings.dictationHint {
+                        HStack { FlowKeycaps(shortcut: hint); Text("tap or hold to dictate in any app").font(.system(size: 11)).foregroundStyle(FlowTheme.inkMuted) }
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             }
             if controller.hasFailedRecording {
@@ -194,7 +230,7 @@ struct QuickPanelView: View {
                 HStack {
                     Text("RECENT NOTES").font(.system(size: 10, weight: .semibold)).tracking(0.7).foregroundStyle(FlowTheme.inkFaint)
                     Spacer()
-                    Button("View all") { close(); controller.openWorkspace() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(FlowTheme.accent)
+                    Button("Today") { close(); controller.openDayNote() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(FlowTheme.accent)
                 }
                 VStack(spacing: 2) {
                     ForEach(controller.notes.prefix(3)) { note in

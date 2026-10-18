@@ -39,14 +39,18 @@ final class DailyNoteTests: XCTestCase {
         XCTAssertEqual(daily.rawText, "um first\n\nsecond")
         XCTAssertEqual(daily.duration, 5)
         XCTAssertTrue(daily.isPinned)
-        XCTAssertEqual(daily.captures?.map(\.id), [firstID, secondID])
-        XCTAssertEqual(daily.captures?.map(\.sourceApplication), ["Mail", "Safari"])
+        // The edit becomes a written entry; the replaced dictation keeps its ID and metadata.
+        XCTAssertEqual(daily.captures?.filter { $0.entryKind == .dictation }.map(\.id), [firstID, secondID])
+        XCTAssertEqual(daily.captures?.filter { $0.entryKind == .dictation }.map(\.sourceApplication), ["Mail", "Safari"])
+        XCTAssertEqual(daily.visibleCaptures.map(\.text), ["My edited thought.", "Second."])
+        XCTAssertNil(daily.editedText)
         XCTAssertEqual(daily.captures?.last?.createdAt, morning.addingTimeInterval(3600))
         XCTAssertEqual(restored.latestText, "Second.")
         XCTAssertTrue(restored.hasPersistedNote(secondID))
         // Retrying the most recent capture must not append its transcript again.
         restored.addNote(id: secondID, rawText: "second", cleanedText: "Second.", duration: 3)
-        XCTAssertEqual(restored.notes.first?.captures?.count, 2)
+        XCTAssertEqual(restored.notes.first?.captures?.count, 3)
+        XCTAssertTrue(restored.hasPersistedNote(firstID))
     }
 
     func testLocalMidnightStartsANewNoteAndManualNotesStaySeparate() throws {
@@ -113,7 +117,7 @@ final class DailyNoteTests: XCTestCase {
         XCTAssertTrue(store.updateNote(pending))
         let daily = try XCTUnwrap(AppStore(rootURL: root).notes.first)
         XCTAssertEqual(daily.displayText, "Unsaved editing\n\nNew dictation")
-        XCTAssertEqual(daily.captures?.count, 2)
+        XCTAssertEqual(daily.captures?.filter { $0.entryKind == .dictation }.count, 2)
         XCTAssertEqual(daily.duration, 3)
         XCTAssertTrue(store.hasPersistedNote(nextID))
     }

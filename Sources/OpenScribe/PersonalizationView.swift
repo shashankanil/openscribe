@@ -41,6 +41,7 @@ struct PersonalizationView: View {
                             }.buttonStyle(.flowSecondary)
                         }
                     }
+                    smartCorrections
                 }
                 HStack {
                     Text(section == .dictionary ? "Corrections" : section.rawValue).font(.system(size: 13, weight: .semibold))
@@ -50,7 +51,7 @@ struct PersonalizationView: View {
                     }.buttonStyle(.flowSecondary)
                 }
                 entries
-                Text(section == .dictionary ? "Corrections work even when writing cleanup is off. Vocabulary guides AI cleanup."
+                Text(section == .dictionary ? "Corrections work even when writing cleanup is off. Vocabulary also guides the speech model and AI cleanup."
                      : section == .snippets ? "A trigger must be the entire dictation. Snippets insert their exact text and skip cleanup."
                      : "App styles apply when writing cleanup is on, using the app where recording starts.")
                     .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).fixedSize(horizontal: false, vertical: true)
@@ -63,6 +64,44 @@ struct PersonalizationView: View {
             Button("Remove", role: .destructive) { deleteAction?(); deleteAction = nil; controller.flash("Removed") }
             Button("Cancel", role: .cancel) { deleteAction = nil }
         } message: { Text("Future dictations will use your remaining preferences.") }
+    }
+
+    private var smartCorrections: some View {
+        let settings = controller.settings
+        let support = SpeechHints.support(for: settings)
+        return FlowSettingsGroup(title: "Smart corrections") {
+            FlowSettingsRow(title: "Send words to the speech model", detail: {
+                switch support {
+                case let .native(detail): return detail
+                case .cleanupOnly: return "This speech model doesn’t take word hints. Your dictionary is applied after transcription instead."
+                }
+            }(), symbol: "waveform.badge.magnifyingglass") {
+                Toggle("Send words to the speech model", isOn: binding(\.speechHints)).labelsHidden().toggleStyle(.switch)
+                    .disabled(support == .cleanupOnly)
+            }
+            FlowRowDivider()
+            FlowSettingsRow(title: "Understand spoken corrections",
+                            detail: "Say “Shashank, S-H-A-S-H-A-N-K” or “Friday, no wait, Thursday”. A quick AI check runs only when a dictation sounds like a correction, and changes only what it’s sure of.",
+                            symbol: "text.magnifyingglass") {
+                Toggle("Understand spoken corrections", isOn: binding(\.spokenCorrections)).labelsHidden().toggleStyle(.switch)
+            }
+            FlowRowDivider()
+            FlowSettingsRow(title: "Learn words you spell out", detail: "Adds them to your vocabulary so they’re right next time.", symbol: "plus.bubble") {
+                Toggle("Learn words you spell out", isOn: binding(\.learnSpelledWords)).labelsHidden().toggleStyle(.switch)
+                    .disabled(!settings.spokenCorrections)
+            }
+            FlowRowDivider()
+            FlowSettingsRow(title: "Correction model", detail: "A small, fast model keeps this quick. Uses \(settings.languageModelProvider.title), like cleanup.", symbol: "cpu") {
+                TextField(SpokenCorrection.model(for: { var s = settings; s.correctionModel = ""; return s }()), text: binding(\.correctionModel))
+                    .textFieldStyle(.roundedBorder).frame(width: 220)
+                    .disabled(!settings.spokenCorrections)
+            }
+        }
+    }
+
+    private func binding<T>(_ keyPath: WritableKeyPath<AppSettings, T>) -> Binding<T> {
+        Binding(get: { controller.settings[keyPath: keyPath] },
+                set: { value in controller.updateSettings { $0[keyPath: keyPath] = value } })
     }
 
     @ViewBuilder private var entries: some View {
