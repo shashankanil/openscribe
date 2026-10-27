@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenScribe Flowbar</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent !important;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      button { -webkit-app-region: no-drag; }
+      .flowbar-icon, .flowbar-menu-item { transition: background 120ms ease; }
+      .flowbar-icon:hover, .flowbar-menu-item:hover,
+      .flowbar-menu-item:focus-visible { background: var(--os-flowbar-hover) !important; }
+      :focus-visible { outline: 2px solid var(--os-flowbar-accent); outline-offset: -2px; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition: none !important; animation: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/flowbar/main.tsx"></script>
+  </body>
+</html>

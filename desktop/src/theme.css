@@ -1,0 +1,100 @@
+/* Design tokens mirroring Sources/OpenScribe/FlowTheme.swift. Every window imports this file and
+   colours only through these variables, so light, dark and "system" resolve the same everywhere. */
+:root {
+  color-scheme: light;
+  --os-background: rgb(249 247 243);
+  --os-surface: rgb(254 254 252);
+  --os-surface-muted: rgb(38 43 31 / .05);
+  --os-surface-hover: rgb(38 43 31 / .08);
+  --os-line: rgb(38 43 31 / .12);
+  --os-ink: rgb(31 36 28);
+  --os-ink-muted: rgb(31 36 28 / .65);
+  --os-ink-faint: rgb(31 36 28 / .48);
+  --os-accent: rgb(173 82 26);
+  --os-accent-soft: rgb(173 82 26 / .08);
+  --os-primary-text: rgb(255 252 245);
+  --os-recording: rgb(232 61 69);
+  --os-recording-soft: rgb(232 61 69 / .10);
+  --os-success: rgb(33 158 97);
+  --os-success-soft: rgb(33 158 97 / .12);
+  --os-warning: rgb(204 128 13);
+  --os-warning-soft: rgb(204 128 13 / .12);
+  --os-overlay: rgb(0 0 0 / .32);
+  --os-shadow: 0 18px 50px rgb(31 36 28 / .10);
+  /* The Flowbar and its bubbles are always dark on macOS (`.environment(\.colorScheme, .dark)`). */
+  --os-flowbar: rgb(20 23 31);
+  --os-flowbar-ink: rgb(245 244 238);
+  --os-flowbar-line: rgb(255 255 255 / .12);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --os-background: rgb(17 18 17);
+  --os-surface: rgb(28 30 28);
+  --os-surface-muted: rgb(250 247 235 / .06);
+  --os-surface-hover: rgb(250 247 235 / .10);
+  --os-line: rgb(250 247 235 / .10);
+  --os-ink: rgb(245 242 232);
+  --os-ink-muted: rgb(245 242 232 / .65);
+  --os-ink-faint: rgb(245 242 232 / .46);
+  --os-accent: rgb(240 184 99);
+  --os-accent-soft: rgb(240 184 99 / .10);
+  --os-primary-text: rgb(31 36 28);
+  --os-recording: rgb(255 99 102);
+  --os-recording-soft: rgb(255 99 102 / .14);
+  --os-success: rgb(77 209 140);
+  --os-success-soft: rgb(77 209 140 / .14);
+  --os-warning: rgb(255 184 71);
+  --os-warning-soft: rgb(255 184 71 / .14);
+  --os-overlay: rgb(0 0 0 / .55);
+  --os-shadow: 0 18px 50px rgb(0 0 0 / .40);
+}
+
+
+:root {
+  --os-flowbar-ink-muted: rgb(245 244 238 / .85);
+  --os-flowbar-ink-faint: rgb(245 244 238 / .60);
+  --os-flowbar-idle-fill: rgb(245 244 238 / .50);
+  --os-flowbar-idle-line: rgb(0 0 0 / .30);
+  --os-flowbar-accent: rgb(240 184 99);
+  --os-flowbar-recording: rgb(255 99 102);
+  --os-flowbar-recording-soft: rgb(255 99 102 / .16);
+  --os-flowbar-success: rgb(77 209 140);
+  --os-flowbar-hover: rgb(255 255 255 / .12);
+  --os-flowbar-active: rgb(255 255 255 / .18);
+  --os-flowbar-surface: rgb(255 255 255 / .10);
+  --os-flowbar-shadow: 0 4px 12px rgb(0 0 0 / .35);
+  --os-region-shade: rgb(0 0 0 / .28);
+  --os-region-border: rgb(255 255 255);
+  --os-region-hint-bg: rgb(20 20 20 / .72);
+  --os-region-hint-text: rgb(255 255 255);
+  --os-region-shadow: 0 2px 8px rgb(0 0 0 / .24);
+  --os-notes-error-bg: rgb(232 61 69 / .10);
+  --os-notes-error-text: rgb(232 61 69);
+  --os-notes-scrollbar: rgb(31 36 28 / .25);
+  --os-notes-scrollbar-hover: rgb(31 36 28 / .45);
+  --os-notes-shadow: 0 1px 3px rgb(0 0 0 / .10);
+}
+:root[data-theme="dark"] {
+  --os-flowbar-ink-muted: rgb(245 244 238 / .85);
+  --os-flowbar-ink-faint: rgb(245 244 238 / .60);
+  --os-flowbar-idle-fill: rgb(245 244 238 / .50);
+  --os-flowbar-idle-line: rgb(0 0 0 / .30);
+  --os-flowbar-accent: rgb(240 184 99);
+  --os-flowbar-recording: rgb(255 99 102);
+  --os-flowbar-recording-soft: rgb(255 99 102 / .16);
+  --os-flowbar-success: rgb(77 209 140);
+  --os-flowbar-hover: rgb(255 255 255 / .12);
+  --os-flowbar-active: rgb(255 255 255 / .18);
+  --os-flowbar-surface: rgb(255 255 255 / .10);
+  --os-flowbar-shadow: 0 4px 12px rgb(0 0 0 / .35);
+  --os-region-shade: rgb(0 0 0 / .28);
+  --os-region-border: rgb(255 255 255);
+  --os-region-hint-bg: rgb(20 20 20 / .72);
+  --os-region-hint-text: rgb(255 255 255);
+  --os-region-shadow: 0 2px 8px rgb(0 0 0 / .24);
+  --os-notes-error-bg: rgb(255 99 102 / .14);
+  --os-notes-error-text: rgb(255 99 102);
+  --os-notes-scrollbar: rgb(245 242 232 / .25);
+  --os-notes-scrollbar-hover: rgb(245 242 232 / .45);
+  --os-notes-shadow: 0 1px 3px rgb(0 0 0 / .30);
+}
