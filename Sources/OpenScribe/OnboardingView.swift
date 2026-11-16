@@ -1,221 +1,249 @@
 import SwiftUI
 
-struct OnboardingView: View {
-    @ObservedObject var controller: AppController
-    @ObservedObject private var permissions: PermissionCenter
-    @State private var step = 0
-    @State private var error: String?
-    @State private var working = false
-    @State private var attemptedPractice = false
-    @State private var launchAtLogin = true
+/// The screens of first-run setup, in order. Only the four middle steps show progress dots.
+enum OnboardingStep: String, CaseIterable, Identifiable {
+    case welcome, microphone, connect, everyApp, tryIt, done
 
-    init(controller: AppController) {
+    var id: String { rawValue }
+
+    /// Position among the progress dots, if this step has one.
+    var progressIndex: Int? {
+        switch self {
+        case .microphone: return 0
+        case .connect: return 1
+        case .everyApp: return 2
+        case .tryIt: return 3
+        case .welcome, .done: return nil
+        }
+    }
+    static let progressCount = 4
+
+    var next: OnboardingStep? {
+        let all = Self.allCases
+        guard let index = all.firstIndex(of: self), index + 1 < all.count else { return nil }
+        return all[index + 1]
+    }
+
+    var previous: OnboardingStep? {
+        let all = Self.allCases
+        guard let index = all.firstIndex(of: self), index > 0 else { return nil }
+        return all[index - 1]
+    }
+
+    /// Where to pick up, from facts first and the saved step second: the first missing requirement
+    /// (microphone, then key); with both in place, Try it if the person got that far or Accessibility is
+    /// already allowed, otherwise the optional Accessibility step. Someone who never left Welcome starts there.
+    static func resume(from readiness: SetupReadiness, saved: OnboardingStep?) -> OnboardingStep {
+        guard saved != nil else { return .welcome }
+        if !readiness.microphone { return .microphone }
+        if !readiness.speechKey { return .connect }
+        if saved == .tryIt || saved == .done || readiness.accessibility { return .tryIt }
+        return .everyApp
+    }
+
+    private static let savedKey = "onboarding-v4-step"
+    static var saved: OnboardingStep? { UserDefaults.standard.string(forKey: savedKey).flatMap(OnboardingStep.init(rawValue:)) }
+    static func save(_ step: OnboardingStep) {
+        guard step != .welcome else { return }
+        UserDefaults.standard.set(step.rawValue, forKey: savedKey)
+    }
+    static func clearSaved() { UserDefaults.standard.removeObject(forKey: savedKey) }
+}
+
+/// Moves between steps. Steps decide when to call it; the container owns the current step.
+struct OnboardingNavigator {
+    let step: OnboardingStep
+    /// False in previews and render tests: no system prompts, audio, Flowbar or saved progress.
+    let live: Bool
+    let go: (OnboardingStep) -> Void
+
+    func next() { if let next = step.next { go(next) } }
+    func back() { if let previous = step.previous { go(previous) } }
+}
+
+/// First-run setup, shown in its own small window. Welcome → Microphone → Connect → Works in every app
+/// → Try it → Meet the Flowbar.
+struct OnboardingView: View {
+    static let windowSize = CGSize(width: 760, height: 560)
+
+    @ObservedObject var controller: AppController
+    @State private var step: OnboardingStep
+    @State private var forward = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let live: Bool
+
+    /// The app's setup window: resumes from what is already in place, or starts over when `restart` is set.
+    init(controller: AppController, restart: Bool = false) {
         self.controller = controller
-        permissions = controller.permissions
+        live = true
+        _step = State(initialValue: restart ? .welcome
+                      : OnboardingStep.resume(from: controller.setupReadiness, saved: OnboardingStep.saved))
+    }
+
+    /// Previews and render tests: a fixed step with no side effects.
+    init(controller: AppController, initialStep: OnboardingStep) {
+        self.controller = controller
+        live = false
+        _step = State(initialValue: initialStep)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 9) {
-                WhisperlightLogo(size: 28)
-                Text("OpenScribe").font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Button("Set up later") { controller.onboardingVisible = false }
-                    .buttonStyle(.flowGhost).disabled(controller.isDictationBusy)
-            }.padding(.horizontal, 32).padding(.top, 44)
-            Spacer(minLength: 20)
-            VStack(alignment: .leading, spacing: 24) {
-                HStack(spacing: 7) {
-                    ForEach(Array(["Welcome", "Connect", "Access", "Try it"].enumerated()), id: \.offset) { index, title in
-                        HStack(spacing: 6) {
-                            ZStack {
-                                Circle().fill(index <= step ? FlowTheme.accent : FlowTheme.surfaceMuted).frame(width: 20, height: 20)
-                                if index < step { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(FlowTheme.primaryText) }
-                                else { Text("\(index + 1)").font(.system(size: 10, weight: .semibold)).foregroundStyle(index == step ? FlowTheme.primaryText : FlowTheme.inkFaint) }
-                            }
-                            Text(title).font(.system(size: 11.5, weight: index == step ? .semibold : .regular))
-                                .foregroundStyle(index == step ? FlowTheme.ink : FlowTheme.inkFaint)
-                        }
-                        if index < 3 { Rectangle().fill(FlowTheme.line).frame(height: 1) }
-                    }
-                }
-                Group {
-                    switch step {
-                    case 0: welcome
-                    case 1: connection
-                    case 2: access
-                    default: practice
-                    }
-                }.frame(maxWidth: .infinity, minHeight: 285, alignment: .topLeading)
-                if let error { Label(error, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(FlowTheme.recording) }
-                Rectangle().fill(FlowTheme.line).frame(height: 1)
-                HStack {
-                    if step > 0 { Button("Back") { error = nil; step -= 1 }.buttonStyle(.flowGhost).disabled(controller.isDictationBusy) }
-                    Spacer()
-                    Button(primaryTitle) { advance() }
-                        .buttonStyle(.flow(.primary, size: .large)).disabled(primaryDisabled)
-                }
-            }
-            .padding(30).flowCard(padding: 0, radius: 20).frame(maxWidth: 620)
-            .padding(.horizontal, 32)
-            Spacer(minLength: 20)
-            Text("Your voice. Your providers. Your Mac.").font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).padding(.bottom, 24)
+        ZStack {
+            page.id(step).transition(transition)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity).background(FlowTheme.background)
+        .frame(width: Self.windowSize.width, height: Self.windowSize.height)
+        .background(FlowTheme.background)
+        .foregroundStyle(FlowTheme.ink)
         .tint(FlowTheme.accent)
-        .onAppear {
-            if keySaved { step = controller.setupReadiness.canDictate ? 3 : 2 }
-            launchAtLogin = controller.launchAtLogin || !controller.hasCompletedSetup
-        }
-        // Only the access step needs to watch System Settings; the check is cheap and publishes only real changes.
-        .task(id: step) {
-            guard step == 2 else { return }
-            while !Task.isCancelled {
-                permissions.refresh()
-                do { try await Task.sleep(nanoseconds: 700_000_000) } catch { return }
-            }
-        }
-        .onChange(of: permissions.microphoneStatus) { _, _ in controller.refreshPermissions() }
-        .onChange(of: permissions.accessibilityTrusted) { _, _ in controller.refreshPermissions() }
-        // The shortcut works here too, so a practice run can start without the button.
-        .onChange(of: controller.capturePhase) { _, phase in if phase == .recording { attemptedPractice = true } }
+        .ignoresSafeArea()
+        .onChange(of: step) { _, step in if live { OnboardingStep.save(step) } }
     }
 
-    private var keySaved: Bool { !controller.credential(for: .speech).isEmpty }
-
-    private var primaryTitle: String {
+    @ViewBuilder private var page: some View {
+        let nav = OnboardingNavigator(step: step, live: live, go: go)
         switch step {
-        case 0: return "Let’s get started"
-        case 1: return "Continue"
-        case 2: return "Continue"
-        default: return "Start using OpenScribe"
-        }
-    }
-    private var primaryDisabled: Bool {
-        controller.isDictationBusy || (step == 1 && !keySaved)
-            || (step >= 2 && !controller.setupReadiness.canDictate)
-    }
-
-    private var welcome: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("A thought. A breath.\nThe words are there.").font(.system(size: 32, weight: .bold, design: .rounded)).tracking(-0.7)
-            Text("Speak naturally. OpenScribe turns your voice into writing, right where you work.")
-                .font(.system(size: 14)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 14) {
-                feature("waveform", title: "Speak, don’t type", detail: "A shortcut starts dictation in any app.")
-                feature("person.2.wave.2", title: "Keep the conversation", detail: "Record calls and get transcripts and summaries.")
-                feature("lock.shield", title: "Stay in control", detail: "Bring your own provider keys. Your history stays on this Mac.")
-            }
+        case .welcome: OnboardingWelcomeStep(nav: nav)
+        case .microphone: OnboardingMicrophoneStep(controller: controller, permissions: controller.permissions, nav: nav)
+        case .connect: OnboardingConnectStep(controller: controller, nav: nav)
+        case .everyApp: OnboardingEveryAppStep(controller: controller, permissions: controller.permissions, nav: nav)
+        case .tryIt: OnboardingTryItStep(controller: controller, permissions: controller.permissions, nav: nav)
+        case .done: OnboardingDoneStep(controller: controller, nav: nav)
         }
     }
 
-    private var connection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            heading("Connect your voice", detail: "Add a transcription provider to turn recordings into notes.")
-            ProviderConnectionCard(controller: controller, purpose: .speech)
-            Text("Recordings go directly to the provider you choose. Writing cleanup is optional and can be set up later.")
-                .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-        }
+    private var transition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(insertion: .opacity.combined(with: .offset(x: forward ? 28 : -28)), removal: .opacity)
     }
 
-    private var access: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            heading("A little access. A lot less typing.", detail: "macOS keeps these permissions under your control.")
-            FlowSettingsGroup {
-                FlowSettingsRow(title: "Microphone", detail: "Hear you only when you record", symbol: "mic") {
-                    if permissions.microphoneReady { FlowBadge(text: "Allowed", color: FlowTheme.success, symbol: "checkmark") }
-                    else {
-                        Button(working ? "Waiting…" : permissions.microphoneStatus == .notDetermined ? "Allow" : "Open Settings") {
-                            working = true
-                            Task { await controller.requestMicrophonePermission(); working = false }
-                        }.buttonStyle(.flowSecondary).disabled(working)
-                    }
-                }
-                FlowRowDivider()
-                FlowSettingsRow(title: "Accessibility", detail: "Paste into apps and use your shortcut", symbol: "text.cursor") {
-                    if permissions.accessibilityTrusted { FlowBadge(text: "Allowed", color: FlowTheme.success, symbol: "checkmark") }
-                    else { Button("Open Settings") { controller.openAccessibilitySettings() }.buttonStyle(.flowSecondary) }
-                }
+    private func go(_ target: OnboardingStep) {
+        guard target != step else { return }
+        let all = OnboardingStep.allCases
+        forward = (all.firstIndex(of: target) ?? 0) > (all.firstIndex(of: step) ?? 0)
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .easeOut(duration: 0.24)) { step = target }
+    }
+}
+
+// MARK: - Shared layout
+
+/// One screen: content centered vertically in the window, a footer with progress (or a note) and actions.
+struct OnboardingPage<Content: View, Leading: View, Actions: View>: View {
+    let step: OnboardingStep
+    var centered = false
+    var spacing: CGFloat = 16
+    @ViewBuilder var content: () -> Content
+    @ViewBuilder var leading: () -> Leading
+    @ViewBuilder var actions: () -> Actions
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: centered ? .center : .leading, spacing: spacing) { content() }
+                .multilineTextAlignment(centered ? .center : .leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: centered ? .center : .leading)
+                .padding(.horizontal, 60)
+                .padding(.top, 44)
+                .padding(.bottom, 6)
+            HStack(spacing: 12) {
+                leading()
+                Spacer(minLength: 12)
+                HStack(spacing: 8) { actions() }
             }
-            if permissions.microphoneNeedsSettings {
-                Text("Turn on OpenScribe under Microphone in System Settings, then come back. This screen updates automatically.")
-                    .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-            }
-            if !permissions.accessibilityTrusted {
-                Text("Enable OpenScribe in Accessibility, then return here. This screen updates automatically.")
-                    .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-                Button(controller.settings.pasteIntoFocusedApp ? "Use Notes only for now" : "Notes-only mode selected") {
-                    controller.updateSettings { $0.pasteIntoFocusedApp = false }
-                }.buttonStyle(.flowGhost)
-            }
+            .padding(.horizontal, 22)
+            .padding(.top, 12)
+            .padding(.bottom, 18)
         }
     }
+}
 
-    private var practice: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            heading("Make your first note", detail: "Try “This is my first note in OpenScribe.” It will be saved in Notes.")
-            HStack {
-                Button {
-                    if controller.capturePhase == .recording { controller.finishCapture() }
-                    else { attemptedPractice = true; controller.startCapture() }
-                } label: {
-                    Label(controller.capturePhase == .recording ? "Stop & save" : "Try a recording", systemImage: controller.capturePhase == .recording ? "stop.fill" : "mic.fill")
-                }.buttonStyle(.flowPrimary).disabled(controller.isDictationBusy && controller.capturePhase != .recording)
-                if controller.isDictationBusy {
-                    Text(controller.captureHint).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-                    FlowIconButton(symbol: "xmark", help: "Cancel recording") { controller.cancelCapture() }
-                }
-            }
-            if attemptedPractice && !controller.currentTranscript.isEmpty {
-                Text(controller.currentTranscript).font(.system(size: 13)).textSelection(.enabled).lineLimit(4)
-                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(FlowTheme.surfaceMuted, in: RoundedRectangle(cornerRadius: 10))
-            }
-            if let hint = controller.settings.dictationHint {
-                HStack {
-                    FlowKeycaps(shortcut: hint)
-                    Text("Or use the shortcut: tap to start and stop, or hold to talk. Change it in Shortcuts.")
-                        .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
-                }
-            }
-            if LoginItem.isAvailable {
-                Toggle("Launch OpenScribe when I log in", isOn: $launchAtLogin).toggleStyle(.switch).font(.system(size: 13))
+extension OnboardingPage where Leading == OnboardingProgress {
+    init(step: OnboardingStep, centered: Bool = false, spacing: CGFloat = 16,
+         @ViewBuilder content: @escaping () -> Content, @ViewBuilder actions: @escaping () -> Actions) {
+        self.init(step: step, centered: centered, spacing: spacing, content: content,
+                  leading: { OnboardingProgress(step: step) }, actions: actions)
+    }
+}
+
+/// Four dots: finished steps faded, the current one stretched into a pill.
+struct OnboardingProgress: View {
+    let step: OnboardingStep
+
+    var body: some View {
+        let current = step.progressIndex ?? -1
+        HStack(spacing: 7) {
+            ForEach(0..<OnboardingStep.progressCount, id: \.self) { index in
+                Capsule()
+                    .fill(index <= current ? FlowTheme.accent : FlowTheme.line)
+                    .opacity(index < current ? 0.45 : 1)
+                    .frame(width: index == current ? 18 : 6, height: 6)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(current >= 0 ? "Step \(current + 1) of \(OnboardingStep.progressCount)" : "")
+    }
+}
+
+enum OnboardingText {
+    static func eyebrow(_ text: String) -> some View {
+        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.8).foregroundStyle(FlowTheme.inkFaint)
     }
 
-    private func heading(_ title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.system(size: 25, weight: .bold)).tracking(-0.4)
-            Text(detail).font(.system(size: 13)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
-        }
+    static func title(_ text: String, size: CGFloat = 27) -> some View {
+        Text(text).font(.system(size: size, weight: .bold)).tracking(size > 30 ? -0.9 : -0.6)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityAddTraits(.isHeader)
     }
 
-    private func feature(_ symbol: String, title: String, detail: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 15, weight: .medium)).foregroundStyle(FlowTheme.accent)
-                .frame(width: 34, height: 34).background(FlowTheme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+    static func body(_ text: String) -> some View {
+        Text(text).font(.system(size: 13.5)).foregroundStyle(FlowTheme.inkMuted)
+            .frame(maxWidth: 470, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    static func note(_ text: String) -> some View {
+        Text(text).font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A filled circle with a check, or an empty ring for something still to do.
+struct OnboardingCheck: View {
+    let done: Bool
+    var size: CGFloat = 18
+
+    var body: some View {
+        ZStack {
+            Circle().fill(done ? FlowTheme.success : Color.clear)
+            Circle().stroke(done ? Color.clear : FlowTheme.line, lineWidth: 1.5)
+            if done {
+                Image(systemName: "checkmark").font(.system(size: size * 0.5, weight: .heavy)).foregroundStyle(.white)
             }
         }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
+}
 
-    private func advance() {
-        guard !primaryDisabled else { return }
-        if step == 0 { step = 1 }
-        else if step == 1 { connect() }
-        else if step == 2 { step = 3 }
-        else {
-            if LoginItem.isAvailable { controller.setLaunchAtLogin(launchAtLogin) }
-            controller.finishOnboarding()
-        }
-    }
+/// The Flowbar's dark pill, used in the Welcome and Done illustrations.
+struct OnboardingPill<Content: View>: View {
+    @ViewBuilder var content: () -> Content
 
-    private func connect() {
-        guard keySaved else { return }
-        if controller.credential(for: .languageModel).isEmpty { controller.updateSettings { $0.cleanupEnabled = false } }
-        step = 2; error = nil
+    var body: some View {
+        HStack(spacing: 9) { content() }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(OnboardingPalette.pillInk)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Capsule(style: .circular).fill(OnboardingPalette.pill).shadow(color: .black.opacity(0.25), radius: 9, y: 6))
+            .overlay(Capsule(style: .circular).strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
     }
+}
+
+enum OnboardingPalette {
+    static let pill = Color(red: 0.08, green: 0.09, blue: 0.12)
+    static let pillInk = Color(red: 1.0, green: 0.98, blue: 0.90)
+    static let pillRecording = Color(red: 1.0, green: 0.39, blue: 0.40)
+}
+
+extension AccessibilityNotification.Announcement {
+    /// VoiceOver hears status changes such as "Microphone allowed".
+    static func say(_ message: String) { AccessibilityNotification.Announcement(message).post() }
 }

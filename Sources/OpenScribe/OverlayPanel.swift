@@ -36,9 +36,21 @@ enum FlowbarMode: Equatable {
         case .idleExpanded: return 150
         case .dictating, .processing, .meetingSaving: return 88
         case .confirmation: return 52
-        case let .meeting(_, expanded): return expanded ? 140 : 84
+        case let .meeting(_, expanded): return expanded ? Self.meetingExpanded : Self.meetingCollapsed
         }
     }
+
+    static let meetingCollapsed: CGFloat = 84
+    static let meetingExpanded: CGFloat = 148
+
+    /// A meeting pill grows from its far end only, so the stop button never moves under the pointer.
+    var growsFromTrailingEnd: Bool {
+        if case .meeting = self { return true }
+        return false
+    }
+
+    /// How far the pill extends past its resting, centred position toward its leading end.
+    var leadingGrowth: CGFloat { growsFromTrailingEnd ? width - Self.meetingCollapsed : 0 }
 
     /// Thickness of the pill. Idle is a quiet translucent sliver, light enough to find on any background.
     var height: CGFloat { self == .idle ? 6 : FlowbarLayout.pillHeight }
@@ -58,6 +70,8 @@ enum FlowbarLayout {
     /// How close to a side the pointer must be for the pill to stand up vertically.
     static let dockReach: CGFloat = 70
     static let maxWidth: CGFloat = 150
+    /// A brief cue that dictation is hands-free.
+    static let lockTint = Color(red: 0.55, green: 0.85, blue: 0.65)
     static let ink = Color(red: 0.08, green: 0.09, blue: 0.12)
     static let cream = Color(red: 1.0, green: 0.98, blue: 0.90)
     static let amber = Color(red: 0.94, green: 0.72, blue: 0.39)
@@ -106,6 +120,8 @@ final class OverlayPanel: NSPanel {
     private var pressEvent: NSEvent?
     private var shrinkTask: Task<Void, Never>?
     private var layoutScheduled = false
+    /// How far the window's centre is shifted from the anchor toward the pill's leading end.
+    private var leadOffset: CGFloat = 0
 
     @MainActor
     init(controller: AppController) {
@@ -198,29 +214,49 @@ final class OverlayPanel: NSPanel {
     private func layout() {
         guard let controller, dragStart == nil else { return }
         if anchor == nil { restorePlacement(controller.settings) }
-        let target = FlowbarMode.current(controller, hovering: model.hovering).width + FlowbarLayout.inset * 2
+        let mode = FlowbarMode.current(controller, hovering: model.hovering)
+        let target = mode.width + FlowbarLayout.inset * 2
+        let lead = mode.leadingGrowth / 2
         shrinkTask?.cancel()
         if target >= length || !isVisible {
-            place(length: target)
+            place(length: target, lead: lead)
         } else {
             // Let the pill finish shrinking inside the window before the window follows.
             shrinkTask = Task { @MainActor [weak self] in
                 do { try await Task.sleep(nanoseconds: 320_000_000) } catch { return }
-                self?.place(length: target)
+                self?.place(length: target, lead: lead)
             }
         }
         placeBubble()
     }
 
     @MainActor
-    private func place(length: CGFloat) {
+    private func place(length: CGFloat, lead: CGFloat? = nil) {
         guard let anchor else { return }
+        if let lead { leadOffset = lead }
         let thickness = FlowbarLayout.pillHeight + FlowbarLayout.inset * 2
         let size = model.vertical ? NSSize(width: thickness, height: length) : NSSize(width: length, height: thickness)
-        let target = NSRect(x: (anchor.x - size.width / 2).rounded(), y: (anchor.y - size.height / 2).rounded(),
-                            width: size.width, height: size.height)
+        let target = NSRect(origin: origin(for: size, around: anchor), size: size)
         guard target != frame else { return }
         setFrame(target, display: true)
+    }
+
+    /// Window origin for a pill resting at `anchor`. A pill that grows from one end is shifted so its
+    /// other end stays put, and it is kept on screen along its length.
+    private func origin(for size: NSSize, around anchor: NSPoint) -> NSPoint {
+        var center = anchor
+        // Upright pills are rotated clockwise, so their leading end points up.
+        if model.vertical { center.y += leadOffset } else { center.x -= leadOffset }
+        var origin = NSPoint(x: (center.x - size.width / 2).rounded(), y: (center.y - size.height / 2).rounded())
+        if let visible = (screen ?? NSScreen.main)?.visibleFrame {
+            let slack = FlowbarLayout.inset
+            if model.vertical {
+                origin.y = min(max(origin.y, visible.minY - slack), visible.maxY - size.height + slack)
+            } else {
+                origin.x = min(max(origin.x, visible.minX - slack), visible.maxX - size.width + slack)
+            }
+        }
+        return origin
     }
 
     /// The notice bubble floats beside the pill, on the side with the most room.
@@ -232,7 +268,7 @@ final class OverlayPanel: NSPanel {
             return
         }
         let size = bubble.fittedSize()
-        bubble.setFrame(NSRect(origin: Self.origin(beside: anchor, dock: model.dock, size: size, gap: 4, in: visible), size: size), display: true)
+        bubble.setFrame(NSRect(origin: Self.origin(beside: anchor, dock: model.dock, size: size, gap: 0, in: visible), size: size), display: true)
         if !bubble.isVisible { bubble.orderFrontRegardless() }
     }
 
@@ -330,7 +366,7 @@ final class OverlayPanel: NSPanel {
                 place(length: length)
             }
         }
-        setFrameOrigin(NSPoint(x: (moved.x - frame.width / 2).rounded(), y: (moved.y - frame.height / 2).rounded()))
+        setFrameOrigin(origin(for: frame.size, around: moved))
         placeBubble()
     }
 
@@ -352,7 +388,7 @@ final class OverlayPanel: NSPanel {
         let size = frame.size
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
-            animator().setFrameOrigin(NSPoint(x: (target.x - size.width / 2).rounded(), y: (target.y - size.height / 2).rounded()))
+            animator().setFrameOrigin(origin(for: size, around: target))
         } completionHandler: { [weak self] in
             MainActor.assumeIsolated { self?.placeBubble() }
         }
@@ -390,8 +426,8 @@ final class NoticeBubblePanel: NSPanel {
     /// Measures the bubble's current content directly, so a stale window size never squeezes or clips it.
     @MainActor
     func fittedSize() -> NSSize {
-        let size = NSHostingController(rootView: host.rootView).sizeThatFits(in: NSSize(width: 320, height: 400))
-        return NSSize(width: min(320, ceil(size.width)), height: min(400, ceil(size.height)))
+        let size = NSHostingController(rootView: host.rootView).sizeThatFits(in: NSSize(width: 380, height: 400))
+        return NSSize(width: min(380, ceil(size.width)), height: min(400, ceil(size.height)))
     }
 }
 
@@ -400,74 +436,118 @@ struct NoticeBubbleView: View {
     @ObservedObject var meetings: MeetingController
     @State private var hovering = false
 
+    private static let success = Color(red: 0.30, green: 0.82, blue: 0.55)
+
     var body: some View {
-        if let id = meetings.shortMeeting {
-            shortMeeting(id)
-        } else {
-            notice
+        Group {
+            if let id = meetings.shortMeeting {
+                shortMeeting(id)
+            } else {
+                notice
+            }
         }
+        // Room for the shadow; the panel itself is transparent.
+        .padding(8)
+        .environment(\.colorScheme, .dark)
     }
 
     /// "Was this a mistake?" for a meeting too short to summarize.
     private func shortMeeting(_ id: UUID) -> some View {
         let words = controller.meetings.store.record(id)?.wordCount ?? 0
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                Circle().fill(FlowbarLayout.amber).frame(width: 5, height: 5)
+        return HStack(alignment: .top, spacing: 10) {
+            icon("person.2.wave.2.fill", tint: FlowbarLayout.amber)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(words == 0 ? "That meeting had almost no speech." : "That meeting was very short (\(words) words).")
-                    .font(.system(size: 11.5, weight: .medium)).foregroundStyle(FlowbarLayout.cream.opacity(0.92))
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(FlowbarLayout.cream.opacity(0.95))
+                Text("Started by mistake? Summarize only if you need it.")
+                    .font(.system(size: 12)).foregroundStyle(FlowbarLayout.cream.opacity(0.62))
+                HStack(spacing: 6) {
+                    bubbleButton("Summarize", prominent: true) { controller.resolveShortMeeting(summarize: true) }
+                    bubbleButton("Keep transcript") { controller.resolveShortMeeting(summarize: false) }
+                    bubbleButton("Delete") { controller.resolveShortMeeting(delete: true) }
+                }
+                .padding(.top, 5)
             }
-            Text("Started by mistake? Summarize only if you need it.")
-                .font(.system(size: 11)).foregroundStyle(FlowbarLayout.cream.opacity(0.6))
-            HStack(spacing: 6) {
-                bubbleButton("Summarize", prominent: true) { controller.resolveShortMeeting(summarize: true) }
-                bubbleButton("Keep") { controller.resolveShortMeeting(summarize: false) }
-                bubbleButton("Delete") { controller.resolveShortMeeting(delete: true) }
-            }
+            .fixedSize()
+            closeButton(help: "Keep the transcript without a summary") { controller.resolveShortMeeting(summarize: false) }
         }
-        .padding(.horizontal, 11).padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(FlowbarLayout.ink))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 1))
-        .fixedSize()
-        .padding(4)
-        .environment(\.colorScheme, .dark)
+        .modifier(BubbleChrome())
     }
 
     private func bubbleButton(_ title: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(prominent ? FlowbarLayout.ink : FlowbarLayout.cream.opacity(0.85))
-                .padding(.horizontal, 9).padding(.vertical, 4)
+            Text(title).font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(prominent ? FlowbarLayout.ink : FlowbarLayout.cream.opacity(0.88))
+                .padding(.horizontal, 10).frame(height: 24)
                 .background(prominent ? FlowbarLayout.amber : .white.opacity(0.1), in: Capsule())
                 .contentShape(Capsule())
         }.buttonStyle(.plain)
     }
 
     private var notice: some View {
-        HStack(spacing: 7) {
-            Circle().fill(controller.infoNotice == nil ? FlowbarLayout.amber : Color(red: 0.30, green: 0.82, blue: 0.55)).frame(width: 5, height: 5)
-            Text(controller.infoNotice ?? UserNotice.summary(controller.lastError ?? ""))
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(FlowbarLayout.cream.opacity(0.92))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 240, alignment: .leading)
-            // Always laid out, so showing it on hover never changes the bubble's size.
-            Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(FlowbarLayout.cream.opacity(0.6))
-                .frame(width: 14, height: 14).contentShape(Rectangle())
-                .opacity(hovering ? 1 : 0)
-                .onTapGesture { controller.dismissNotice() }
+        let info = controller.infoNotice != nil
+        let full = controller.lastError ?? ""
+        let message = controller.infoNotice ?? UserNotice.summary(full)
+        let hasDetails = !info && !full.isEmpty && full != message
+        return HStack(alignment: .top, spacing: 10) {
+            icon(info ? "checkmark.circle.fill" : "exclamationmark.circle.fill", tint: info ? Self.success : FlowbarLayout.amber)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(message)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(FlowbarLayout.cream.opacity(0.95))
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                if info || hasDetails {
+                    Text(info ? "Open dictionary" : "Show details")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(FlowbarLayout.cream.opacity(hovering ? 0.8 : 0.5))
+                }
+            }
+            .frame(minWidth: 150, maxWidth: 260, alignment: .leading)
+            .padding(.top, 1)
+            closeButton(help: "Dismiss") { controller.dismissNotice() }
         }
-        .padding(.horizontal, 10).padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(FlowbarLayout.ink))
-        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 1))
-        .fixedSize()
-        .padding(4)
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+        .modifier(BubbleChrome())
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onHover { inside in
+            hovering = inside
+            controller.holdNotice(inside)
+        }
         .onTapGesture { controller.inspectNotice() }
-        .help(controller.infoNotice == nil ? "Click for details" : "Click to open your dictionary")
-        .environment(\.colorScheme, .dark)
+        .help(info ? "Click to open your dictionary" : "Click for details")
+    }
+
+    private func icon(_ symbol: String, tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 18, height: 18)
+    }
+
+    private func closeButton(help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 9.5, weight: .bold))
+                .foregroundStyle(FlowbarLayout.cream.opacity(0.75))
+                .frame(width: 20, height: 20)
+                .background(.white.opacity(0.1), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+/// Shared look for bubbles beside the Flowbar.
+private struct BubbleChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(.leading, 12).padding(.trailing, 9).padding(.vertical, 11)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(FlowbarLayout.ink))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+            .fixedSize()
+            .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
     }
 }
 
@@ -495,7 +575,8 @@ struct FlowbarView: View {
         let idle = mode == .idle
         HStack(spacing: 8) { content(mode) }
             .padding(.horizontal, idle ? 6 : 11)
-            .frame(width: mode.width, height: mode.height)
+            // Content stays pinned to the stop button while the pill animates its width.
+            .frame(width: mode.width, height: mode.height, alignment: mode.growsFromTrailingEnd ? .trailing : .center)
             // Idle: a pale sliver with a dark rim, faint but findable on light and dark screens alike.
             .background(Capsule().fill(idle ? FlowbarLayout.cream.opacity(0.5) : FlowbarLayout.ink))
             .overlay(Capsule().strokeBorder(idle ? Color.black.opacity(0.3) : .white.opacity(0.13), lineWidth: idle ? 0.5 : 1))
@@ -506,15 +587,25 @@ struct FlowbarView: View {
             .shadow(color: .black.opacity(idle ? 0 : 0.28), radius: idle ? 0 : 6, y: 2)
             // Docked, every state hugs the screen edge instead of floating at the window's center.
             .padding(model.dock == .left ? .leading : .trailing, model.dock == .none ? 0 : FlowbarLayout.inset)
+            // A meeting pill is pinned at its stop-button end while it grows and shrinks.
+            .padding(vertical ? .bottom : .trailing, mode.growsFromTrailingEnd ? FlowbarLayout.inset : 0)
             // The idle sliver is tiny, so the whole window catches the pointer.
-            .frame(maxWidth: .infinity, maxHeight: .infinity,
-                   alignment: model.dock == .left ? .leading : model.dock == .right ? .trailing : .center)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment(for: mode))
             .contentShape(Rectangle())
             .onHover { model.setHovering($0) }
             .animation(.spring(response: 0.3, dampingFraction: 0.86), value: mode)
             .environment(\.colorScheme, .dark)
             .help(help(mode))
             .contextMenu { menu }
+    }
+
+    private func alignment(for mode: FlowbarMode) -> Alignment {
+        let pinned = mode.growsFromTrailingEnd
+        switch model.dock {
+        case .left: return pinned ? .bottomLeading : .leading
+        case .right: return pinned ? .bottomTrailing : .trailing
+        case .none: return pinned ? .trailing : .center
+        }
     }
 
     @ViewBuilder private func content(_ mode: FlowbarMode) -> some View {
@@ -538,11 +629,12 @@ struct FlowbarView: View {
         case .dictating:
             // The line is the whole control: click to finish, Escape to cancel.
             Button { controller.finishCapture() } label: {
-                RecorderSquiggle(recorder: controller.recorder, color: FlowbarLayout.cream)
+                RecorderSquiggle(recorder: controller.recorder, color: controller.handsFree ? FlowbarLayout.lockTint : FlowbarLayout.cream)
                     .frame(maxWidth: .infinity).frame(height: 20).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Listening. Click to finish, or press Escape to cancel.")
+            .accessibilityLabel(controller.handsFree ? "Hands-free dictation. Click or press the key again to finish."
+                                                     : "Listening. Click to finish, or press Escape to cancel.")
         case .processing, .meetingSaving:
             FlowSquiggle(color: FlowbarLayout.amber, motion: .flowing)
                 .frame(maxWidth: .infinity).frame(height: 16)
@@ -554,20 +646,24 @@ struct FlowbarView: View {
             .frame(maxWidth: .infinity)
             .accessibilityLabel(message)
         case let .meeting(paused, expanded):
-            // The line opens the meeting's notes; hovering adds notes and screenshot buttons; stop ends it here.
+            // Hovering slides notes and screenshot buttons in from the far end. The line (open notes)
+            // and the stop button keep their exact position, so the pointer never chases them.
+            if expanded {
+                Group {
+                    FlowbarButton(symbol: "note.text", help: "Meeting notes") { controller.showMeetingNotes() }
+                    ScreenshotMenu(controller: controller, help: hint("Screenshot into this meeting · hold for more", .screenshotArea),
+                                   hint: hint)
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.7)))
+            }
             Button { controller.showMeetingNotes() } label: {
                 RecorderSquiggle(recorder: controller.meetings.microphone, color: FlowbarLayout.cream.opacity(paused ? 0.4 : 1),
                                  motion: paused ? .still : .live)
-                    .frame(maxWidth: .infinity).frame(height: 18)
+                    .frame(width: 34, height: 18)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(paused ? "Meeting paused. Open meeting notes." : "Recording meeting. Open meeting notes.")
-            if expanded {
-                FlowbarButton(symbol: "note.text", help: "Meeting notes") { controller.showMeetingNotes() }
-                ScreenshotMenu(controller: controller, help: hint("Screenshot into this meeting · hold for more", .screenshotArea),
-                               hint: hint)
-            }
             MeetingStopButton(paused: paused, busy: controller.meetings.isBusy) { controller.meetings.finish() }
         }
     }
@@ -576,7 +672,7 @@ struct FlowbarView: View {
     private func help(_ mode: FlowbarMode) -> String {
         switch mode {
         case .idle, .idleExpanded: return controller.captureHint
-        case .dictating: return "Click to finish · Esc to cancel"
+        case .dictating: return controller.handsFree ? "Hands-free · press the key again or click to finish" : "Click to finish · Esc to cancel"
         case let .processing(label): return label + "…"
         case .meetingSaving: return "Saving meeting…"
         case let .confirmation(message): return message

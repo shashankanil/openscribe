@@ -158,17 +158,26 @@ enum ShortcutFormatter {
     static let supportedModifiers: NSEvent.ModifierFlags = [.control, .option, .shift, .command, .function]
 
     static func display(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, characters: String? = nil) -> String {
-        if keyCode == 63 {
-            return "Globe"
+        if let lone = KeyShortcut.modifierKeys[keyCode] {
+            return lone.name
         }
         var symbols = ""
         if modifiers.contains(.control) { symbols += "⌃" }
         if modifiers.contains(.option) { symbols += "⌥" }
         if modifiers.contains(.shift) { symbols += "⇧" }
         if modifiers.contains(.command) { symbols += "⌘" }
-        let key = characters.flatMap { $0.isEmpty ? nil : $0.uppercased() } ?? keyName(for: keyCode)
+        let named = keyName(for: keyCode)
+        let printable = characters.flatMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+            return trimmed.isEmpty || trimmed.unicodeScalars.contains { $0.properties.generalCategory == .privateUse } ? nil : trimmed.uppercased()
+        }
+        let key = named.hasPrefix("Key ") ? (printable ?? named) : (Self.namedKeys.contains(keyCode) ? named : (printable ?? named))
         return symbols.isEmpty ? key : "\(symbols) \(key)"
     }
+
+    /// Keys whose name reads better than the character they type (Space, arrows, F-keys…).
+    private static let namedKeys: Set<UInt16> = Set<UInt16>([49, 36, 48, 53, 51, 123, 124, 125, 126, 117, 115, 119, 116, 121, 76])
+        .union(KeyShortcut.functionKeys)
 
     private static func keyName(for keyCode: UInt16) -> String {
         switch keyCode {
@@ -241,6 +250,21 @@ enum ShortcutFormatter {
         case 45: return "N"
         case 46: return "M"
         case 63: return "Globe"
+        case 105: return "F13"
+        case 107: return "F14"
+        case 113: return "F15"
+        case 106: return "F16"
+        case 64: return "F17"
+        case 79: return "F18"
+        case 80: return "F19"
+        case 90: return "F20"
+        case 117: return "⌦"
+        case 115: return "Home"
+        case 119: return "End"
+        case 116: return "Page Up"
+        case 121: return "Page Down"
+        case 76: return "Enter"
+        case 10: return "§"
         default: return "Key \(keyCode)"
         }
     }
@@ -332,12 +356,19 @@ struct AppSettings: Codable, Equatable {
     var overlayPosition = "bottom-center"
     var dictationMode: DictationMode = .toggle
     var theme: FlowThemeVariant = .system
+    /// First shortcut of each action, kept for older builds. `shortcutBindings` is the source of truth.
     var shortcuts: [String: KeyShortcut] = Dictionary(uniqueKeysWithValues: ShortcutDefaults.bindings.map { ($0.key.rawValue, $0.value) })
+    /// Every shortcut for each action. An action can have several.
+    var shortcutBindings: [String: [KeyShortcut]] = ShortcutDefaults.lists
     /// Where the Flowbar was dragged to. `nil` uses the preset in `overlayPosition`.
     var flowbarPlacement: FlowbarPlacement?
     var meetingMicrophone = true
     var meetingSystemAudio = true
     var meetingSummarize = true
+    /// Upload notes and meetings to OpenScribe Cloud so LLM clients can reach them over remote MCP.
+    var cloudSyncEnabled = false
+    /// A self-hosted OpenScribe Cloud. Empty uses the hosted service.
+    var cloudServerURL = ""
 
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
@@ -349,7 +380,8 @@ struct AppSettings: Codable, Equatable {
         case cleanupEnabled, pasteIntoFocusedApp, saveRawAudio
         case showOverlayWhenIdle, shortcutDisplay, shortcutKeyCode, shortcutModifiers, overlayPosition
         case dictationMode, theme, interactionSounds, snippets, appWritingTones, microphoneDeviceUID
-        case shortcuts, flowbarPlacement, meetingMicrophone, meetingSystemAudio, meetingSummarize
+        case shortcuts, shortcutBindings, flowbarPlacement, meetingMicrophone, meetingSystemAudio, meetingSummarize
+        case cloudSyncEnabled, cloudServerURL
     }
 
     init() {}
@@ -406,10 +438,14 @@ struct AppSettings: Codable, Equatable {
         theme = try container.decodeIfPresent(FlowThemeVariant.self, forKey: .theme) ?? .system
         shortcuts = try container.decodeIfPresent([String: KeyShortcut].self, forKey: .shortcuts)
             ?? ShortcutDefaults.migrated(keyCode: shortcutKeyCode, modifiers: shortcutModifiers, display: shortcutDisplay, mode: dictationMode)
+        shortcutBindings = try container.decodeIfPresent([String: [KeyShortcut]].self, forKey: .shortcutBindings)
+            ?? shortcuts.mapValues { [$0] }
         flowbarPlacement = try container.decodeIfPresent(FlowbarPlacement.self, forKey: .flowbarPlacement)
         meetingMicrophone = try container.decodeIfPresent(Bool.self, forKey: .meetingMicrophone) ?? true
         meetingSystemAudio = try container.decodeIfPresent(Bool.self, forKey: .meetingSystemAudio) ?? true
         meetingSummarize = try container.decodeIfPresent(Bool.self, forKey: .meetingSummarize) ?? true
+        cloudSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncEnabled) ?? false
+        cloudServerURL = try container.decodeIfPresent(String.self, forKey: .cloudServerURL) ?? ""
     }
 }
 

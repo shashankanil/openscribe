@@ -125,12 +125,18 @@ struct DayNoteView: View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).foregroundStyle(FlowTheme.inkFaint)
                 .frame(width: 52, alignment: .trailing)
-            TextField(isToday ? "Write a thought… (⏎ to add)" : "Add to this day…", text: $composer, axis: .vertical)
+            TextField(isToday ? "Write a thought…" : "Add to this day…", text: $composer, axis: .vertical)
                 .textFieldStyle(.plain).font(.system(size: 14.5)).lineSpacing(5).lineLimit(1...8)
                 .focused($composerFocused)
                 .onSubmit(addEntry)
                 .accessibilityLabel("New entry")
+            // The hint appears only once there is something to add.
+            if !composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("⏎ to add").font(.system(size: 11.5, weight: .medium)).foregroundStyle(FlowTheme.inkFaint)
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeOut(duration: 0.15), value: composer.isEmpty)
         .padding(.vertical, 10)
     }
 

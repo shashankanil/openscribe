@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case notes, meetings, general, shortcuts, connections, personalize, privacy, permissions, calendar
+    case notes, meetings, general, shortcuts, connections, ai, personalize, privacy, permissions, calendar
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -11,6 +11,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .general: return "General"
         case .shortcuts: return "Shortcuts"
         case .connections: return "API & Models"
+        case .ai: return "AI & MCP"
         case .personalize: return "Personalization"
         case .privacy: return "Privacy"
         case .permissions: return "Permissions"
@@ -24,6 +25,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .general: return "slider.horizontal.3"
         case .shortcuts: return "command"
         case .connections: return "network"
+        case .ai: return "sparkles"
         case .personalize: return "text.badge.plus"
         case .privacy: return "lock.shield"
         case .permissions: return "checkmark.shield"
@@ -31,7 +33,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
 
     static let library: [WorkspaceSection] = [.notes, .meetings, .calendar]
-    static let settings: [WorkspaceSection] = [.general, .shortcuts, .connections, .personalize, .privacy, .permissions]
+    static let settings: [WorkspaceSection] = [.general, .shortcuts, .connections, .ai, .personalize, .privacy, .permissions]
     var isSettings: Bool { Self.settings.contains(self) }
 }
 
@@ -41,18 +43,13 @@ struct MainWorkspaceView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            if controller.onboardingVisible {
-                OnboardingView(controller: controller).transition(.opacity)
-            } else {
-                workspace.transition(.opacity)
-            }
+            workspace
             if let toast = controller.toast {
                 FlowToast(message: toast)
                     .padding(.bottom, 26)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.22), value: controller.onboardingVisible)
         .animation(FlowTheme.spring, value: controller.toast)
         .frame(minWidth: 900, minHeight: 620)
         .background(FlowTheme.background)
@@ -144,6 +141,7 @@ struct MainWorkspaceView: View {
         let meetings = controller.meetings
         let calendarTitle = controller.calendar.trackedTitle
         VStack(spacing: 8) {
+            setupBanner
             if let error = controller.store.storageError, section == .notes || section.isSettings {
                 FlowBanner(symbol: "externaldrive.badge.exclamationmark", tint: FlowTheme.warning,
                            title: "Check your local history", detail: UserNotice.summary(error)) {
@@ -186,6 +184,32 @@ struct MainWorkspaceView: View {
         .padding(.top, 14)
         .animation(FlowTheme.spring, value: controller.hasFailedRecording)
         .animation(FlowTheme.spring, value: meetings.occupiesCapture)
+    }
+
+    /// After setup, anything dictation loses (microphone, key) or paste loses (Accessibility) is explained
+    /// here with its fix, instead of reopening onboarding.
+    @ViewBuilder private var setupBanner: some View {
+        let readiness = controller.setupReadiness
+        if controller.hasCompletedSetup && !controller.onboardingVisible {
+            if !readiness.microphone && section != .permissions {
+                FlowBanner(symbol: "mic.slash.fill", tint: FlowTheme.warning, title: "Microphone access is off",
+                           detail: "Dictation is paused until you switch it back on.") {
+                    Button(controller.permissions.microphoneStatus == .notDetermined ? "Allow" : "Open System Settings") {
+                        Task { await controller.requestMicrophonePermission() }
+                    }.buttonStyle(.flow(.secondary, size: .small))
+                }
+            } else if !readiness.speechKey && section != .connections {
+                FlowBanner(symbol: "key.fill", tint: FlowTheme.warning, title: "Add a speech key to dictate",
+                           detail: "Your notes are safe. Dictation needs a provider key to transcribe.") {
+                    Button("Add key") { controller.workspaceSection = .connections }.buttonStyle(.flow(.secondary, size: .small))
+                }
+            } else if readiness.canDictate && readiness.pasteBlocked && section != .permissions && (section == .notes || section.isSettings) {
+                FlowBanner(symbol: "text.cursor", tint: FlowTheme.warning, title: "Paste is off — Accessibility isn’t allowed",
+                           detail: "Dictations are saved to Notes until you allow it.") {
+                    Button("Fix") { controller.workspaceSection = .permissions }.buttonStyle(.flow(.secondary, size: .small))
+                }
+            }
+        }
     }
 
     // MARK: - Keyboard
@@ -269,11 +293,21 @@ private struct CaptureDock: View {
 
     private var setupNeeded: some View {
         Group {
-            Label("Finish setup", systemImage: "sparkles").font(.system(size: 12.5, weight: .semibold))
-            Text("Connect a provider and allow the microphone to start dictating.")
-                .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
-            Button("Continue setup") { controller.showOnboarding() }
-                .buttonStyle(.flow(.primary, fullWidth: true))
+            if controller.hasCompletedSetup {
+                let missing = controller.setupReadiness.missingRequirement
+                Label(missing == .microphone ? "Microphone is off" : "Add a speech key", systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text(missing == .microphone ? "Allow the microphone to dictate again." : "Dictation needs a provider key.")
+                    .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
+                Button("Fix it") { controller.workspaceSection = missing == .microphone ? .permissions : .connections }
+                    .buttonStyle(.flow(.primary, fullWidth: true))
+            } else {
+                Label("Finish setup", systemImage: "sparkles").font(.system(size: 12.5, weight: .semibold))
+                Text("Allow the microphone and connect a provider to start dictating.")
+                    .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted).fixedSize(horizontal: false, vertical: true)
+                Button("Continue setup") { controller.showOnboarding() }
+                    .buttonStyle(.flow(.primary, fullWidth: true))
+            }
         }
     }
 

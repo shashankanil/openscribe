@@ -13,6 +13,7 @@ final class AppController: ObservableObject {
     let providerClient: ProviderClient
     let meetings: MeetingController
     let calendar: CalendarMeetingController
+    let cloud: CloudSyncController
     private var calendarSubscription: AnyCancellable?
     private var meetingSubscription: AnyCancellable?
     private var noticeSubscriptions = Set<AnyCancellable>()
@@ -59,6 +60,16 @@ final class AppController: ObservableObject {
     private var shortcutCaptureActive = false
     private var hasBooted = false
     private var holdToTalkReleasePending = false
+    /// Push to talk: hold to record, or double-tap to keep recording hands-free until the next press.
+    private enum TalkKeyState: Equatable { case idle, holding(Date), awaitingSecondTap, locked }
+    private var talkKey: TalkKeyState = .idle
+    private var talkTapTask: Task<Void, Never>?
+    /// Recording continues without holding the key; the next press finishes it.
+    @Published private(set) var handsFree = false
+    /// How the latest shortcut dictation was finished, so onboarding can check off each gesture.
+    @Published private(set) var lastDictationGesture: DictationGestureEvent?
+    private var onboardingWindow: NSWindow?
+    private var onboardingCloseObserver: NSObjectProtocol?
     private var transientErrorTask: Task<Void, Never>?
     @Published private(set) var hasFailedRecording = false
     @Published private(set) var failedRecordingCount = 0
@@ -74,7 +85,9 @@ final class AppController: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var readyTask: Task<Void, Never>?
 
-    var hasCompletedSetup: Bool { UserDefaults.standard.bool(forKey: setupCompletedKey) }
+    /// Setup was finished once (this version, or the earlier permission onboarding, which could only be
+    /// finished with dictation working). After that, onboarding never reopens by itself.
+    var hasCompletedSetup: Bool { UserDefaults.standard.bool(forKey: setupCompletedKey) || permissions.hasSeenOnboarding }
     var storageRoot: URL { dataRoot }
 
     init(rootURL: URL? = nil) {
@@ -83,6 +96,7 @@ final class AppController: ObservableObject {
         store = AppStore(rootURL: root)
         meetings = MeetingController(store: MeetingStore(root: root.appendingPathComponent("Meetings")), credentialRootURL: root)
         calendar = CalendarMeetingController()
+        cloud = CloudSyncController(dataRoot: root)
         recovery = DictationRecoveryStore(root: root.appendingPathComponent("DictationRecovery"))
         recorder = AudioRecorder()
         permissions = PermissionCenter()
@@ -97,6 +111,7 @@ final class AppController: ObservableObject {
             Task { @MainActor in self?.meetingStateChanged() }
         }
         calendarSubscription = calendar.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        cloud.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &noticeSubscriptions)
         permissions.onChange = { [weak self] in self?.refreshPermissions() }
         Publishers.Merge(meetings.$error, calendar.$error)
             .removeDuplicates()
@@ -154,17 +169,21 @@ final class AppController: ObservableObject {
         guard !hasBooted else { return }
         hasBooted = true
         calendar.boot(app: self)
+        cloud.boot(app: self)
         applyTheme(settings.theme)
         permissions.refresh()
         NSLog("OpenScribe booted")
-        let completed = UserDefaults.standard.bool(forKey: setupCompletedKey)
-            || (permissions.hasSeenOnboarding && setupReadiness.canDictate)
-        if setupReadiness.shouldPresent(completed: completed, explicitlyRequested: CommandLine.arguments.contains("--onboarding")) {
-            showOnboarding()
+        let forced = CommandLine.arguments.contains("--onboarding")
+        if setupReadiness.shouldPresent(completed: hasCompletedSetup, explicitlyRequested: forced) {
+            showOnboarding(force: forced)
         }
         startHotkeyIfAllowed()
         captureHint = idleHint
         refreshOverlay()
+        // After setup, something missing is a notice and a workspace banner, never the full flow again.
+        if hasCompletedSetup && !forced, let missing = setupReadiness.missingRequirement {
+            notify(Self.setupNotice(for: missing))
+        }
     }
 
     private var pasteLastTask: Task<Void, Never>?
@@ -226,7 +245,7 @@ final class AppController: ObservableObject {
         holdToTalkReleasePending = false
         permissions.refresh()
         guard !credential(for: .speech).isEmpty else {
-            showOnboarding()
+            setupMissing(.speechKey)
             return
         }
         guard permissions.microphoneReady else {
@@ -329,6 +348,13 @@ final class AppController: ObservableObject {
             return
         }
         holdToTalkReleasePending = false
+        resetTalkKey()
+        // Taps shorter than half a second, or a few seconds of silence, aren't dictation.
+        if recorder.duration < Self.minimumRecording
+            || (recorder.duration < Self.quietDiscardDuration && recorder.peakLevel < Self.speechLevel) {
+            discardShortCapture()
+            return
+        }
         do {
             let result = try recorder.stop()
             if settings.interactionSounds { sounds.play(.stop) }
@@ -356,7 +382,15 @@ final class AppController: ObservableObject {
             dictationLive = nil
             recordingSourceApplication = nil
             recordingSourceBundleIdentifier = nil
-            if case RecorderError.emptyRecording = error, let job = activeRecoveryJob { try? recovery.remove(job.id) }
+            if case RecorderError.emptyRecording = error {
+                if let job = activeRecoveryJob { try? recovery.remove(job.id) }
+                activeRecoveryJob = nil
+                refreshRecoveryState()
+                capturePhase = .idle
+                captureHint = idleHint
+                refreshOverlay()
+                return
+            }
             activeRecoveryJob = nil
             refreshRecoveryState()
             fail(with: error)
@@ -382,6 +416,7 @@ final class AppController: ObservableObject {
         activeRecoveryJob = nil
         refreshRecoveryState()
         holdToTalkReleasePending = false
+        resetTalkKey()
         recordingSourceApplication = nil
         recordingSourceBundleIdentifier = nil
         currentTranscript = ""
@@ -467,19 +502,75 @@ final class AppController: ObservableObject {
                        speechKey: !credential(for: .speech).isEmpty, pasteEnabled: settings.pasteIntoFocusedApp)
     }
 
-    func showOnboarding() {
+    /// Opens setup in its own window. Once setup has been completed, requests from the menu bar or the
+    /// workspace go to the page that fixes what's missing instead; `force` (the `--onboarding` flag)
+    /// always shows the flow from the start.
+    func showOnboarding(force: Bool = false) {
+        if hasCompletedSetup && !force {
+            open(setupReadiness.missingRequirement == .microphone ? .permissions : .connections)
+            return
+        }
         onboardingVisible = true
-        openMainWindow()
+        if onboardingWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: OnboardingView.windowSize.width, height: OnboardingView.windowSize.height),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Set up OpenScribe"
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: OnboardingView(controller: self, restart: force))
+            window.center()
+            onboardingCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onboardingWindowClosed() }
+            }
+            onboardingWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
     }
 
-    func finishOnboarding() {
+    /// Completes setup and opens the workspace, on Notes or on a page a "next" card points to.
+    func finishOnboarding(opening section: WorkspaceSection = .notes) {
         permissions.refresh()
         guard setupReadiness.canDictate else { return }
         UserDefaults.standard.set(true, forKey: setupCompletedKey)
         permissions.markOnboardingSeen()
+        OnboardingStep.clearSaved()
         onboardingVisible = false
+        onboardingWindow?.close()
         startHotkeyIfAllowed()
-        workspaceSection = .notes
+        open(section)
+    }
+
+    /// The close button is the way out of setup; progress is kept and resumes next time.
+    private func onboardingWindowClosed() {
+        if let onboardingCloseObserver { NotificationCenter.default.removeObserver(onboardingCloseObserver) }
+        onboardingCloseObserver = nil
+        onboardingWindow?.contentView = nil
+        onboardingWindow = nil
+        onboardingVisible = false
+    }
+
+    /// Dictation or a meeting needs something setup provides. Before setup is finished that means setup;
+    /// afterwards a notice explains it and the workspace opens on the page with the fix and its banner.
+    private func setupMissing(_ requirement: SetupReadiness.Requirement) {
+        guard hasCompletedSetup else { showOnboarding(); return }
+        notify(Self.setupNotice(for: requirement))
+        open(requirement == .microphone ? .permissions : .connections)
+    }
+
+    static func setupNotice(for requirement: SetupReadiness.Requirement) -> String {
+        switch requirement {
+        case .microphone: return "Microphone access is off, so dictation is paused. Turn it on in Settings › Permissions."
+        case .speechKey: return "Add a speech key to dictate. Your notes are safe."
+        }
     }
 
     func showPermissions() {
@@ -517,26 +608,30 @@ final class AppController: ObservableObject {
             showTransientError("OpenScribe could not restart: \(error.localizedDescription)")
         }
     }
-    // Key combinations need no Accessibility access. Globe is re-registered once access is granted.
-    private var hotkeysHaveGlobeAccess = false
+    // With Accessibility, an event tap handles every kind of shortcut. Without it, key combinations
+    // fall back to Carbon hot keys; the rest are re-registered once access is granted.
+    private var hotkeysHaveAccessibility = false
+    @Published private(set) var hotkeyFailureReasons: [KeyShortcut: HotkeyCenter.FailureReason] = [:]
 
     private func startHotkeyIfAllowed() {
         guard !shortcutCaptureActive else { return }
-        if !hotkeyStarted || hotkeysHaveGlobeAccess != permissions.accessibilityTrusted {
+        if !hotkeyStarted || hotkeysHaveAccessibility != permissions.accessibilityTrusted {
             hotkeyStarted = true
             configureHotkey()
         }
     }
 
     private func configureHotkey() {
-        hotkeysHaveGlobeAccess = permissions.accessibilityTrusted
-        var bindings: [ShortcutAction: KeyShortcut] = [:]
-        for action in ShortcutAction.allCases { bindings[action] = settings.shortcut(for: action) }
+        hotkeysHaveAccessibility = permissions.accessibilityTrusted
+        var bindings: [ShortcutAction: [KeyShortcut]] = [:]
+        for action in ShortcutAction.allCases { bindings[action] = settings.shortcuts(for: action) }
         hotkeys.onEscape = { [weak self] in self?.cancelCapture() }
-        hotkeys.start(bindings: bindings, globeAllowed: hotkeysHaveGlobeAccess,
+        hotkeys.start(bindings: bindings, accessibility: hotkeysHaveAccessibility,
                       onPress: { [weak self] in self?.shortcutPressed($0) },
-                      onRelease: { [weak self] in self?.shortcutReleased($0) })
+                      onRelease: { [weak self] in self?.shortcutReleased($0) },
+                      onInterrupt: { [weak self] in self?.shortcutInterrupted($0) })
         hotkeyFailures = hotkeys.failures
+        hotkeyFailureReasons = hotkeys.failedShortcuts
     }
 
     func restartHotkey() {
@@ -558,27 +653,70 @@ final class AppController: ObservableObject {
         return displaced
     }
 
+    /// Adds a shortcut to an action (or swaps `existing` for it). Returns the action that lost it, if any.
+    @discardableResult
+    func addShortcut(_ shortcut: KeyShortcut, to action: ShortcutAction, replacing existing: KeyShortcut? = nil) -> ShortcutAction? {
+        var displaced: ShortcutAction?
+        updateSettings { displaced = $0.add(shortcut, to: action, replacing: existing) }
+        return displaced
+    }
+
+    func removeShortcut(_ shortcut: KeyShortcut, from action: ShortcutAction) {
+        updateSettings { $0.remove(shortcut, from: action) }
+    }
+
     func resetShortcuts() {
-        updateSettings {
-            $0.shortcuts = Dictionary(uniqueKeysWithValues: ShortcutDefaults.bindings.map { ($0.key.rawValue, $0.value) })
-            $0.syncLegacyShortcut()
+        updateSettings { $0.resetShortcutBindings() }
+    }
+
+    /// Why a particular shortcut isn't active, if it isn't.
+    func shortcutProblem(_ shortcut: KeyShortcut) -> String? {
+        switch hotkeyFailureReasons[shortcut] {
+        case .needsAccessibility: return shortcut.isModifierOnly
+            ? "Needs Accessibility access to watch \(shortcut.display) on its own."
+            : "macOS only allows this key with Accessibility access."
+        case .unavailable: return "Another app or macOS is already using this key."
+        case nil: return nil
         }
     }
 
     // A quick tap of the dictate key keeps recording; holding it records until release.
     private static let holdThreshold: TimeInterval = 0.35
+    /// Time allowed between the two taps of a double-tap.
+    private static let doubleTapWindow: TimeInterval = 0.32
+    /// Anything shorter is a stray tap, never sent for transcription.
+    static let minimumRecording: TimeInterval = 0.5
+    /// Recordings this short are discarded without a notice when they contain no speech.
+    static let quietDiscardDuration: TimeInterval = 3
+    /// Meter level (0–1) that counts as someone speaking.
+    static let speechLevel: Float = 0.12
+
+    private func resetTalkKey() {
+        talkTapTask?.cancel()
+        talkTapTask = nil
+        talkKey = .idle
+        if handsFree { handsFree = false }
+    }
+
+    /// Ends a recording that was too short to be meant, without an error or a saved note.
+    private func discardShortCapture() {
+        guard capturePhase == .recording || startTask != nil else { resetTalkKey(); return }
+        cancelCapture()
+    }
 
     private func shortcutPressed(_ action: ShortcutAction) {
         switch action {
         case .dictate:
             if capturePhase == .recording || startTask != nil {
+                // A press while recording ends a hands-free (tapped) dictation.
+                if dictatePressedAt == nil, capturePhase == .recording { lastDictationGesture = DictationGestureEvent(kind: .handsFree) }
                 dictatePressedAt = nil
                 toggleCapture()
             } else if capturePhase != .transcribing && capturePhase != .cleaning {
                 dictatePressedAt = Date()
                 startCapture()
             }
-        case .holdToTalk: startCapture()
+        case .holdToTalk: talkKeyPressed()
         case .meeting: toggleMeeting()
         case .screenshotArea: takeScreenshot(.area)
         case .screenshotWindow: takeScreenshot(.window)
@@ -592,9 +730,69 @@ final class AppController: ObservableObject {
         case .dictate:
             guard let pressed = dictatePressedAt else { return }
             dictatePressedAt = nil
-            if Date().timeIntervalSince(pressed) >= Self.holdThreshold { finishCapture() }
-        case .holdToTalk: finishCapture()
+            if Date().timeIntervalSince(pressed) >= Self.holdThreshold {
+                lastDictationGesture = DictationGestureEvent(kind: .hold)
+                finishCapture()
+            }
+        case .holdToTalk: talkKeyReleased()
         default: break
+        }
+    }
+
+    /// A lone modifier (Right ⌘, Globe…) turned out to be part of a key combination.
+    private func shortcutInterrupted(_ action: ShortcutAction) {
+        switch action {
+        case .dictate:
+            guard dictatePressedAt != nil else { return }
+            dictatePressedAt = nil
+            discardShortCapture()
+        case .holdToTalk:
+            switch talkKey {
+            case .holding, .awaitingSecondTap: discardShortCapture()
+            case .idle, .locked: break
+            }
+        default: break
+        }
+    }
+
+    private func talkKeyPressed() {
+        switch talkKey {
+        case .locked:
+            lastDictationGesture = DictationGestureEvent(kind: .handsFree)
+            finishCapture()
+        case .awaitingSecondTap:
+            // Second tap: keep recording without holding the key.
+            talkTapTask?.cancel()
+            talkTapTask = nil
+            talkKey = .locked
+            handsFree = true
+            captureHint = "Hands-free · press again to finish"
+            if settings.interactionSounds { sounds.play(.start) }
+        case .idle, .holding:
+            if capturePhase == .recording || startTask != nil {
+                finishCapture() // Started some other way; this press ends it.
+                return
+            }
+            guard capturePhase != .transcribing && capturePhase != .cleaning else { return }
+            talkKey = .holding(Date())
+            startCapture()
+        }
+    }
+
+    private func talkKeyReleased() {
+        guard case let .holding(pressed) = talkKey else { return }
+        if Date().timeIntervalSince(pressed) >= Self.holdThreshold {
+            lastDictationGesture = DictationGestureEvent(kind: .hold)
+            finishCapture()
+            return
+        }
+        // A tap: wait briefly for a second tap; a single tap on its own is discarded.
+        talkKey = .awaitingSecondTap
+        talkTapTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(Self.doubleTapWindow * 1_000_000_000)) } catch { return }
+            guard let self, self.talkKey == .awaitingSecondTap else { return }
+            self.talkTapTask = nil
+            self.discardShortCapture()
         }
     }
 
@@ -621,6 +819,25 @@ final class AppController: ObservableObject {
     }
 
     func report(_ error: Error) { showTransientError(error.localizedDescription) }
+
+    /// A short notice beside the Flowbar from other parts of the app, such as the calendar.
+    func notify(_ message: String) { showTransientError(message) }
+
+    /// Hovering a notice keeps it open; it fades a moment after the pointer leaves.
+    func holdNotice(_ hovering: Bool) {
+        guard noticeVisible else { return }
+        transientErrorTask?.cancel()
+        transientErrorTask = nil
+        guard !hovering else { return }
+        let info = infoNotice != nil
+        transientErrorTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
+            self?.noticeVisible = false
+            if info { self?.infoNotice = nil }
+            self?.transientErrorTask = nil
+            self?.refreshOverlay()
+        }
+    }
 
     func dismissNotice() {
         transientErrorTask?.cancel()
@@ -658,7 +875,7 @@ final class AppController: ObservableObject {
         }
         if capturePhase == .idle { captureHint = idleHint }
         objectWillChange.send()
-        if previous.shortcuts != updated.shortcuts { restartHotkey() }
+        if previous.shortcutBindings != updated.shortcutBindings { restartHotkey() }
         return true
     }
 
@@ -791,6 +1008,15 @@ final class AppController: ObservableObject {
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { rawChunks.append(text) }
                 }
                 guard !rawChunks.isEmpty else {
+                    // A brief recording with nothing in it was almost certainly a stray press: drop it quietly.
+                    if recording.duration < Self.quietDiscardDuration {
+                        if let job { try? recovery.remove(job.id) }
+                        guard captureGeneration == generation else { return }
+                        capturePhase = .idle
+                        captureHint = idleHint
+                        refreshOverlay()
+                        return
+                    }
                     throw ProviderClient.ClientError.provider(message: "No speech was detected. Your recording is kept in Notes so you can retry.")
                 }
                 try Task.checkCancellation()
@@ -932,7 +1158,7 @@ final class AppController: ObservableObject {
         noticeVisible = true
         refreshOverlay()
         transientErrorTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: 7_000_000_000) } catch { return }
             self?.noticeVisible = false
             self?.transientErrorTask = nil
             self?.refreshOverlay()
@@ -1053,7 +1279,7 @@ final class AppController: ObservableObject {
         guard meetings.activeID == nil, !meetings.isBusy else { return }
         permissions.refresh()
         guard !credential(for: .speech).isEmpty || !(settings.meetingLiveTranscription || settings.meetingSummarize) else {
-            showOnboarding()
+            setupMissing(.speechKey)
             return
         }
         meetings.start(title: title, microphone: settings.meetingMicrophone || !settings.meetingSystemAudio,
@@ -1201,3 +1427,15 @@ enum CredentialKey: String {
     case languageModel = "language-model-api-key"
 }
 
+
+/// One finished shortcut dictation. Each event is distinct, so the same gesture twice still registers.
+struct DictationGestureEvent: Equatable {
+    enum Kind: Equatable {
+        /// Held past the hold threshold and released to finish.
+        case hold
+        /// Started hands-free (a tap, or a double-tap of the push-to-talk key) and finished with another press.
+        case handsFree
+    }
+    let kind: Kind
+    let id = UUID()
+}

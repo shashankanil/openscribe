@@ -31,6 +31,9 @@ final class CalendarMeetingController: ObservableObject {
     private var suspended = false
     private var stopped = false
     private var tracked: (event: CalendarMeeting, id: UUID, end: Date)?
+    /// Keeps App Nap from stretching the one-second timer while calendar watching is on. A stretched
+    /// timer looked like a stall and silently dropped the start prompt.
+    private var watchActivity: NSObjectProtocol?
     private var stopRequested = false
     private var normalStopRequested = false
     @Published private(set) var skippedOccurrences: [String: Double]
@@ -59,13 +62,30 @@ final class CalendarMeetingController: ObservableObject {
                 Task { @MainActor in self?.suspended = false; self?.lastTick = Date(); self?.refresh() }
             })
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        timer.tolerance = 0.2
+        // Common modes keep the countdown running while a menu or a drag is tracking events.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         refresh()
     }
 
-    func shutdown() { stopped = true; timer?.invalidate(); timer = nil; closePrompt() }
+    func shutdown() {
+        stopped = true; timer?.invalidate(); timer = nil; closePrompt()
+        updateWatchActivity(false)
+    }
+
+    private func updateWatchActivity(_ watching: Bool) {
+        if watching, watchActivity == nil {
+            watchActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
+                                                                  reason: "Watching the calendar to start meeting recordings on time")
+        } else if !watching, let activity = watchActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            watchActivity = nil
+        }
+    }
 
     func requestAccess() async {
         do {
@@ -78,6 +98,7 @@ final class CalendarMeetingController: ObservableObject {
     func refresh() {
         lastRefresh = Date()
         authorized = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        updateWatchActivity(!stopped && authorized && app?.settings.calendarEnabled == true)
         guard authorized else { calendars = []; upcoming = []; displayedEvents = []; cancelStartPrompt(); return }
         let available = events.calendars(for: .event)
         calendars = available.map { CalendarChoice(id: $0.calendarIdentifier, title: $0.title, account: $0.source.title) }
@@ -147,7 +168,16 @@ final class CalendarMeetingController: ObservableObject {
         let now = Date()
         let gap = now.timeIntervalSince(lastTick)
         lastTick = now
-        if gap > 10 { closePrompt() } // Never act on a countdown missed during sleep or a stalled UI.
+        if gap > 10, let stale = prompt {
+            // Never act on a countdown that ran while the Mac slept or the app stalled. Ask again with a
+            // fresh countdown instead of dropping it, so the meeting isn't silently skipped.
+            if stale.kind == .end || upcoming.contains(where: { $0.id == stale.event.id && $0.end > now }) {
+                present(CalendarPrompt(event: stale.event, kind: stale.kind, deadline: now.addingTimeInterval(60), automatic: stale.automatic))
+            } else {
+                closePrompt()
+            }
+            return
+        }
         if now.timeIntervalSince(lastRefresh) > 30 { refresh() }
         if let tracked {
             if !stopRequested && (!app.settings.calendarEnabled || !authorized || !app.settings.calendarIDs.contains(tracked.event.calendarID) || tracked.event.matchesExclusion(app.settings.calendarExcludedTitles)) {
@@ -176,14 +206,23 @@ final class CalendarMeetingController: ObservableObject {
                 return
             }
             if prompt.automatic && now >= prompt.deadline {
+                if prompt.kind == .start && (app.isDictationBusy || app.meetings.isBusy) {
+                    // Finish the dictation first; the meeting starts right after instead of being skipped.
+                    self.prompt = CalendarPrompt(event: prompt.event, kind: .start, deadline: now.addingTimeInterval(5), automatic: true)
+                    return
+                }
                 if prompt.kind == .start { startPrompt(automatic: true) } else { finishPrompt() }
             }
             return
         }
         guard authorized, app.settings.calendarEnabled, !app.isDictationBusy, app.meetings.activeID == nil, !app.meetings.isBusy else { return }
-        if let event = upcoming.first(where: { $0.isDue(at: now, selected: app.settings.calendarIDs, handled: Set(handled.keys).union(skippedOccurrences.keys), meetingsOnly: app.settings.calendarMeetingsOnly, excludedTitles: app.settings.calendarExcludedTitles) }) {
+        let skipped = Set(handled.keys).union(skippedOccurrences.keys)
+        if let event = upcoming.first(where: { $0.isDue(at: now, selected: app.settings.calendarIDs, handled: skipped, meetingsOnly: app.settings.calendarMeetingsOnly,
+                                                        excludedTitles: app.settings.calendarExcludedTitles, window: CalendarMeeting.lateWindow) }) {
             markHandled(event)
-            present(CalendarPrompt(event: event, kind: .start, deadline: now.addingTimeInterval(60), automatic: app.settings.calendarAutoStart))
+            // Joined late (the app launched or woke after the start): ask, but never start unattended.
+            let onTime = now.timeIntervalSince(event.start) <= CalendarMeeting.automaticWindow
+            present(CalendarPrompt(event: event, kind: .start, deadline: now.addingTimeInterval(60), automatic: app.settings.calendarAutoStart && onTime))
         }
     }
 
@@ -197,17 +236,29 @@ final class CalendarMeetingController: ObservableObject {
             error = "Calendar recording skipped: capture is busy or this event is no longer available."
             return
         }
-        if automatic && (AVCaptureDevice.authorizationStatus(for: .audio) != .authorized || !CGPreflightScreenCaptureAccess()) {
-            error = "Automatic recording skipped. Enable Microphone and Screen & System Audio Recording access before the next meeting."
+        let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let systemAudio = CGPreflightScreenCaptureAccess()
+        if automatic && !microphone {
+            error = "Automatic recording skipped. Allow Microphone access before the next meeting."
+            app.notify("“\(event.title)” wasn’t recorded: OpenScribe needs Microphone access.")
             app.workspaceSection = .calendar
             app.openMainWindow()
             return
         }
-        app.meetings.start(title: event.title, microphone: true, systemAudio: true, settings: app.settings,
+        // Without Screen & System Audio Recording access, record the microphone rather than nothing.
+        let captureSystemAudio = systemAudio || !automatic
+        app.meetings.start(title: event.title, microphone: true, systemAudio: captureSystemAudio, settings: app.settings,
                            summarizeOnStop: app.settings.calendarSummarize, liveTranscription: !automatic && app.settings.meetingLiveTranscription)
         if let id = app.meetings.activeID {
             tracked = (event, id, event.end); trackedTitle = event.title
+            if !captureSystemAudio {
+                error = "Recording your microphone only. Allow Screen & System Audio Recording to capture other participants."
+                app.notify("Recording “\(event.title)” from your microphone only. Allow system audio to hear others.")
+            }
             showPanel()
+        } else {
+            error = "“\(event.title)” couldn’t start recording. \(app.meetings.error ?? "")"
+            app.notify("Calendar recording for “\(event.title)” couldn’t start.")
         }
     }
 

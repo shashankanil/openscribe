@@ -9,6 +9,8 @@ final class AudioRecorder: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var inputLevel: Float = 0
     @Published private(set) var inputLevels = Array(repeating: Float(0.04), count: 11)
+    /// Loudest meter reading of the current recording, used to recognise stray taps with no speech.
+    private(set) var peakLevel: Float = 0
 
     private let engine = AVAudioEngine()
     private let chunkStore = AudioChunkStore()
@@ -68,6 +70,7 @@ final class AudioRecorder: ObservableObject {
         inputLevels = Array(repeating: 0.04, count: inputLevels.count)
         isRecording = true
         startedAt = Date()
+        peakLevel = 0
 
         do {
             let state = chunkStore
@@ -152,6 +155,7 @@ final class AudioRecorder: ObservableObject {
             return
         }
 
+        peakLevel = max(peakLevel, level)
         let smoothed = (inputLevel * 0.35) + (level * 0.65)
         inputLevel = smoothed
         inputLevels = Array(inputLevels.dropFirst()) + [smoothed]

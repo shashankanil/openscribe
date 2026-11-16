@@ -12,9 +12,16 @@ struct CalendarMeeting: Identifiable, Equatable {
     let excluded: Bool
     var isAllDay = false
 
-    func isDue(at now: Date, selected: [String], handled: Set<String>, meetingsOnly: Bool, excludedTitles: [String] = []) -> Bool {
+    /// Starts this recent can begin recording unattended.
+    static let automaticWindow: TimeInterval = 120
+    /// Starts this recent are still offered (with a question, never automatically) when the app
+    /// launches or wakes late.
+    static let lateWindow: TimeInterval = 600
+
+    func isDue(at now: Date, selected: [String], handled: Set<String>, meetingsOnly: Bool, excludedTitles: [String] = [],
+               window: TimeInterval = CalendarMeeting.automaticWindow) -> Bool {
         !excluded && !matchesExclusion(excludedTitles) && selected.contains(calendarID) && !handled.contains(id)
-            && start <= now && now.timeIntervalSince(start) <= 120 && end > now
+            && start <= now && now.timeIntervalSince(start) <= window && end > now
             && (!meetingsOnly || link != nil || hasAttendees)
     }
 

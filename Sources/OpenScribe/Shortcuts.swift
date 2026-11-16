@@ -29,7 +29,7 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .dictate: return "Tap to start and stop. Hold to talk, release to finish."
-        case .holdToTalk: return "Records only while held down."
+        case .holdToTalk: return "Hold to talk. Double-tap to keep going hands-free, then press once to finish."
         case .meeting: return "Records your microphone and system audio."
         case .screenshotArea: return "Drag to select. Saved to today’s note."
         case .screenshotWindow: return "Click a window. Saved to today’s note."
@@ -57,6 +57,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     static let capture: [ShortcutAction] = [.meeting, .screenshotArea, .screenshotWindow, .screenshotScreen]
 }
 
+/// A key combination (any key plus modifiers), a function key on its own, or a single modifier key
+/// on its own such as Right ⌘ or Globe.
 struct KeyShortcut: Codable, Equatable, Hashable {
     var keyCode: UInt16
     var modifiers: UInt
@@ -64,20 +66,52 @@ struct KeyShortcut: Codable, Equatable, Hashable {
 
     var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
     var isGlobe: Bool { keyCode == 63 }
+    /// A lone modifier key. These are watched as the key goes down and up, never as a combination.
+    var isModifierOnly: Bool { KeyShortcut.modifierKeys[keyCode] != nil }
 
     init(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String? = nil) {
         self.keyCode = keyCode
-        let supported = modifiers.intersection(ShortcutFormatter.supportedModifiers)
-        self.modifiers = supported.rawValue
+        let supported = KeyShortcut.modifierKeys[keyCode] != nil ? [] : modifiers.intersection(ShortcutFormatter.supportedModifiers)
+        self.modifiers = (keyCode == 63 ? NSEvent.ModifierFlags.function : supported).rawValue
         self.display = display ?? ShortcutFormatter.display(keyCode: keyCode, modifiers: supported)
     }
 
     static let globe = KeyShortcut(keyCode: 63, modifiers: .function, display: "Globe")
     static let optionSpace = KeyShortcut(keyCode: 49, modifiers: .option, display: "⌥ Space")
+    static let rightCommand = KeyShortcut(keyCode: 54, modifiers: [])
+    static let rightOption = KeyShortcut(keyCode: 61, modifiers: [])
+
+    /// Lone modifier keys: key code → (name, device-specific flag bit, generic flag).
+    static let modifierKeys: [UInt16: (name: String, device: UInt64, generic: NSEvent.ModifierFlags)] = [
+        54: ("Right ⌘", 0x10, .command), 55: ("Left ⌘", 0x08, .command),
+        61: ("Right ⌥", 0x40, .option), 58: ("Left ⌥", 0x20, .option),
+        62: ("Right ⌃", 0x2000, .control), 59: ("Left ⌃", 0x01, .control),
+        60: ("Right ⇧", 0x04, .shift), 56: ("Left ⇧", 0x02, .shift),
+        63: ("Globe", 0x800000, .function),
+    ]
+
+    /// F1–F20 can stand alone; every other key needs at least one modifier so typing isn't hijacked.
+    static let functionKeys: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+
+    /// Whether this can be used as a global shortcut at all.
+    var isUsable: Bool {
+        if isModifierOnly { return true }
+        if keyCode == UInt16(kVK_Escape) { return false }
+        return !modifierFlags.subtracting(.function).isEmpty || KeyShortcut.functionKeys.contains(keyCode)
+    }
+
+    /// Option-only and Option-Shift-only combinations can't be registered as Carbon hot keys from
+    /// macOS 15 on, and lone modifiers never could. These need the keyboard event tap (Accessibility).
+    var needsEventTap: Bool {
+        if isModifierOnly { return true }
+        let flags = modifierFlags.intersection([.command, .control, .option, .shift])
+        if #available(macOS 15, *) { return flags == .option || flags == [.option, .shift] }
+        return false
+    }
 
     /// Two bindings collide when they would fire on the same key press.
     func conflicts(with other: KeyShortcut) -> Bool {
-        if isGlobe || other.isGlobe { return isGlobe && other.isGlobe }
+        if isModifierOnly || other.isModifierOnly { return keyCode == other.keyCode && isModifierOnly == other.isModifierOnly }
         return keyCode == other.keyCode && modifierFlags.subtracting(.function) == other.modifierFlags.subtracting(.function)
     }
 }
@@ -91,6 +125,11 @@ enum ShortcutDefaults {
         .screenshotArea: KeyShortcut(keyCode: 21, modifiers: [.option, .shift]),
         .screenshotWindow: KeyShortcut(keyCode: 23, modifiers: [.option, .shift]),
     ]
+
+    static var lists: [String: [KeyShortcut]] { Dictionary(uniqueKeysWithValues: bindings.map { ($0.key.rawValue, [$0.value]) }) }
+
+    /// Quick picks offered for keys that act while held.
+    static let holdPresets: [KeyShortcut] = [.globe, .rightCommand, .rightOption]
 
     /// Earlier versions had a single key plus a mode. Keep that key working as the user set it up.
     static func migrated(keyCode: UInt16, modifiers: UInt, display: String, mode: DictationMode) -> [String: KeyShortcut] {
@@ -107,32 +146,73 @@ enum ShortcutDefaults {
 }
 
 extension AppSettings {
-    func shortcut(for action: ShortcutAction) -> KeyShortcut? { shortcuts[action.rawValue] }
+    /// Every shortcut for an action, in the order they were added.
+    func shortcuts(for action: ShortcutAction) -> [KeyShortcut] { shortcutBindings[action.rawValue] ?? [] }
 
-    /// Assigning a shortcut removes it from any other action so one press never does two things.
+    /// The first shortcut, used in hints and menus.
+    func shortcut(for action: ShortcutAction) -> KeyShortcut? { shortcuts(for: action).first }
+
+    /// Replaces all of an action's shortcuts with one (or none). Returns the action that lost it, if any.
     @discardableResult
     mutating func assign(_ shortcut: KeyShortcut?, to action: ShortcutAction) -> ShortcutAction? {
+        let displaced = shortcut.flatMap { releaseFromOthers($0, keeping: action) }
+        shortcutBindings[action.rawValue] = shortcut.map { [$0] } ?? []
+        syncLegacyShortcut()
+        return displaced
+    }
+
+    /// Adds another shortcut to an action, or replaces `existing` with it.
+    @discardableResult
+    mutating func add(_ shortcut: KeyShortcut, to action: ShortcutAction, replacing existing: KeyShortcut? = nil) -> ShortcutAction? {
+        let displaced = releaseFromOthers(shortcut, keeping: action)
+        var list = shortcuts(for: action)
+        if let existing, let index = list.firstIndex(of: existing) {
+            list[index] = shortcut
+        } else {
+            list.append(shortcut)
+        }
+        // Keep the first copy of each key, wherever it ended up.
+        var seen: [KeyShortcut] = []
+        for item in list where !seen.contains(where: { $0.conflicts(with: item) }) { seen.append(item) }
+        shortcutBindings[action.rawValue] = seen
+        syncLegacyShortcut()
+        return displaced
+    }
+
+    mutating func remove(_ shortcut: KeyShortcut, from action: ShortcutAction) {
+        shortcutBindings[action.rawValue] = shortcuts(for: action).filter { $0 != shortcut }
+        syncLegacyShortcut()
+    }
+
+    mutating func resetShortcutBindings() {
+        shortcutBindings = ShortcutDefaults.lists
+        syncLegacyShortcut()
+    }
+
+    /// One press never does two things: a key moves to the action it was last assigned to.
+    private mutating func releaseFromOthers(_ shortcut: KeyShortcut, keeping action: ShortcutAction) -> ShortcutAction? {
         var displaced: ShortcutAction?
-        if let shortcut {
-            for other in ShortcutAction.allCases where other != action {
-                if let existing = shortcuts[other.rawValue], existing.conflicts(with: shortcut) {
-                    shortcuts[other.rawValue] = nil
-                    displaced = other
-                }
+        for other in ShortcutAction.allCases where other != action {
+            let list = shortcuts(for: other)
+            let kept = list.filter { !$0.conflicts(with: shortcut) }
+            if kept.count != list.count {
+                shortcutBindings[other.rawValue] = kept
+                displaced = other
             }
         }
-        shortcuts[action.rawValue] = shortcut
-        syncLegacyShortcut()
         return displaced
     }
 
     /// Keep the original single-shortcut fields meaningful for hints and older builds.
     mutating func syncLegacyShortcut() {
-        if let primary = shortcuts[ShortcutAction.dictate.rawValue] ?? shortcuts[ShortcutAction.holdToTalk.rawValue] {
-            shortcutKeyCode = primary.keyCode
-            shortcutModifiers = primary.modifiers
-            shortcutDisplay = primary.display
-            dictationMode = shortcuts[ShortcutAction.dictate.rawValue] == nil ? .holdToTalk : .toggle
+        var primary: [String: KeyShortcut] = [:]
+        for (action, list) in shortcutBindings { if let first = list.first { primary[action] = first } }
+        shortcuts = primary
+        if let first = shortcut(for: .dictate) ?? shortcut(for: .holdToTalk) {
+            shortcutKeyCode = first.keyCode
+            shortcutModifiers = first.modifiers
+            shortcutDisplay = first.display
+            dictationMode = shortcut(for: .dictate) == nil ? .holdToTalk : .toggle
         }
     }
 
@@ -144,56 +224,98 @@ extension AppSettings {
 
 // MARK: - Registration
 
-/// Registers system-wide hotkeys. Key combinations use Carbon hot keys, which are consumed so the
-/// keystroke never reaches the focused app and need no Accessibility access. Globe has no Carbon
-/// equivalent and is observed through modifier-change events instead.
+/// Registers system-wide hotkeys.
+///
+/// With Accessibility access, a keyboard event tap handles every binding: any key combination,
+/// function keys, and lone modifiers such as Right ⌘ or Globe. Matching key presses are consumed
+/// so they never reach the focused app. Without access, key combinations fall back to Carbon hot
+/// keys, which need no permission but can't express lone modifiers or (from macOS 15) Option-only
+/// combinations.
 @MainActor
 final class HotkeyCenter {
-    private var registrations: [UInt32: (ref: EventHotKeyRef, action: ShortcutAction)] = [:]
-    private var handlerRef: EventHandlerRef?
-    private var globe: GlobalHotkey?
-    private var nextID: UInt32 = 1
-    private var onPress: ((ShortcutAction) -> Void)?
-    private var onRelease: ((ShortcutAction) -> Void)?
+    enum FailureReason: Equatable { case needsAccessibility, unavailable }
+
     private(set) var failures: [ShortcutAction] = []
-    private var escapeRef: EventHotKeyRef?
+    private(set) var failedShortcuts: [KeyShortcut: FailureReason] = [:]
+    private(set) var usingEventTap = false
     var onEscape: (() -> Void)?
 
-    private static let signature: OSType = 0x4F53_4352 // "OSCR"
+    private var onPress: ((ShortcutAction) -> Void)?
+    private var onRelease: ((ShortcutAction) -> Void)?
+    /// A lone modifier that was used as part of a combination (Right ⌘ + C) instead of on its own.
+    private var onInterrupt: ((ShortcutAction) -> Void)?
 
-    func start(bindings: [ShortcutAction: KeyShortcut], globeAllowed: Bool,
-               onPress: @escaping (ShortcutAction) -> Void, onRelease: @escaping (ShortcutAction) -> Void) {
+    // Carbon
+    private var registrations: [UInt32: (ref: EventHotKeyRef, action: ShortcutAction)] = [:]
+    private var handlerRef: EventHandlerRef?
+    private var nextID: UInt32 = 1
+    private var escapeRef: EventHotKeyRef?
+    private static let signature: OSType = 0x4F53_4352 // "OSCR"
+    private static let escapeID: UInt32 = 0
+
+    // Event tap
+    private var tap: CFMachPort?
+    private var tapSource: CFRunLoopSource?
+    private var combos: [(shortcut: KeyShortcut, action: ShortcutAction)] = []
+    private var lone: [UInt16: ShortcutAction] = [:]
+    private var heldKeys: [UInt16: ShortcutAction] = [:]
+    private var heldModifier: (keyCode: UInt16, action: ShortcutAction, interrupted: Bool)?
+
+    func start(bindings: [ShortcutAction: [KeyShortcut]], accessibility: Bool,
+               onPress: @escaping (ShortcutAction) -> Void, onRelease: @escaping (ShortcutAction) -> Void,
+               onInterrupt: @escaping (ShortcutAction) -> Void = { _ in }) {
         stop()
         self.onPress = onPress
         self.onRelease = onRelease
+        self.onInterrupt = onInterrupt
         installHandlerIfNeeded()
         failures = []
-        for (action, shortcut) in bindings.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
-            if shortcut.isGlobe {
-                guard globeAllowed else { failures.append(action); continue }
-                let monitor = GlobalHotkey()
-                monitor.start(keyCode: 63, modifiers: .function,
-                              onPress: { [weak self] in self?.onPress?(action) },
-                              onRelease: { [weak self] in self?.onRelease?(action) })
-                globe = monitor
+        failedShortcuts = [:]
+        let all = ShortcutAction.allCases.flatMap { action in (bindings[action] ?? []).map { (shortcut: $0, action: action) } }
+
+        if accessibility, installTap() {
+            usingEventTap = true
+            for item in all {
+                if item.shortcut.isModifierOnly { lone[item.shortcut.keyCode] = item.action }
+                else { combos.append(item) }
+            }
+            return
+        }
+
+        usingEventTap = false
+        for item in all {
+            if item.shortcut.needsEventTap {
+                fail(item.shortcut, item.action, .needsAccessibility)
                 continue
             }
             var ref: EventHotKeyRef?
             let id = nextID
             nextID += 1
-            let status = RegisterEventHotKey(UInt32(shortcut.keyCode), Self.carbonModifiers(shortcut.modifierFlags),
+            let status = RegisterEventHotKey(UInt32(item.shortcut.keyCode), Self.carbonModifiers(item.shortcut.modifierFlags),
                                              EventHotKeyID(signature: Self.signature, id: id),
                                              GetEventDispatcherTarget(), 0, &ref)
-            if status == noErr, let ref { registrations[id] = (ref, action) }
-            else { failures.append(action) }
+            if status == noErr, let ref { registrations[id] = (ref, item.action) }
+            else { fail(item.shortcut, item.action, .unavailable) }
         }
+    }
+
+    private func fail(_ shortcut: KeyShortcut, _ action: ShortcutAction, _ reason: FailureReason) {
+        failedShortcuts[shortcut] = reason
+        if !failures.contains(action) { failures.append(action) }
     }
 
     func stop() {
         for registration in registrations.values { UnregisterEventHotKey(registration.ref) }
         registrations.removeAll()
-        globe?.stop()
-        globe = nil
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
+        if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
+        tap = nil
+        tapSource = nil
+        combos = []
+        lone = [:]
+        heldKeys = [:]
+        heldModifier = nil
+        usingEventTap = false
     }
 
     /// Escape cancels a dictation. It is only claimed while recording so it keeps working everywhere else.
@@ -209,7 +331,101 @@ final class HotkeyCenter {
         }
     }
 
-    private static let escapeID: UInt32 = 0
+    // MARK: Event tap
+
+    private func installTap() -> Bool {
+        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: CGEventMask(mask), callback: { _, type, event, context in
+            guard let context else { return Unmanaged.passUnretained(event) }
+            let center = Unmanaged<HotkeyCenter>.fromOpaque(context).takeUnretainedValue()
+            return MainActor.assumeIsolated { center.handleTap(type: type, event: event) }
+        }, userInfo: context) else { return false }
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        self.tap = tap
+        tapSource = source
+        return true
+    }
+
+    private func handleTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        case .keyDown, .keyUp, .flagsChanged:
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            let consumed = handleKey(type: type, keyCode: keyCode, flags: event.flags.rawValue,
+                                     isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0)
+            return consumed ? nil : Unmanaged.passUnretained(event)
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
+
+    /// Matches one keyboard event against the bindings. Returns true when the event should be swallowed.
+    /// Separated from the tap so it can be tested with synthetic input.
+    @discardableResult
+    func handleKey(type: CGEventType, keyCode: UInt16, flags: UInt64, isRepeat: Bool = false) -> Bool {
+        let generic = NSEvent.ModifierFlags(rawValue: UInt(flags)).intersection([.command, .control, .option, .shift, .function])
+        switch type {
+        case .keyDown:
+            interruptHeldModifier()
+            if heldKeys[keyCode] != nil { return true } // Auto-repeat of a held shortcut.
+            guard let match = combos.first(where: { matches($0.shortcut, keyCode: keyCode, flags: generic) }) else { return false }
+            if isRepeat { return true }
+            heldKeys[keyCode] = match.action
+            dispatch { $0.onPress?(match.action) }
+            return true
+        case .keyUp:
+            guard let action = heldKeys.removeValue(forKey: keyCode) else { return false }
+            dispatch { $0.onRelease?(action) }
+            return true
+        case .flagsChanged:
+            guard let key = KeyShortcut.modifierKeys[keyCode] else { return false }
+            let down = flags & key.device != 0 || (keyCode == 63 && generic.contains(.function))
+            if down {
+                if let held = heldModifier, held.keyCode != keyCode {
+                    interruptHeldModifier() // Another modifier joined in: this is a combination.
+                    return false
+                }
+                guard heldModifier == nil, let action = lone[keyCode] else { return false }
+                // Only on its own: no other modifier may already be down.
+                guard generic.subtracting(key.generic).subtracting(.function).isEmpty else { return false }
+                heldModifier = (keyCode, action, false)
+                dispatch { $0.onPress?(action) }
+            } else if let held = heldModifier, held.keyCode == keyCode {
+                heldModifier = nil
+                if !held.interrupted { dispatch { $0.onRelease?(held.action) } }
+            }
+            return false // Modifier changes always pass through so the rest of the system stays consistent.
+        default:
+            return false
+        }
+    }
+
+    private func matches(_ shortcut: KeyShortcut, keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
+        guard shortcut.keyCode == keyCode else { return false }
+        // Function keys and arrows report Fn implicitly, so it never decides a match.
+        return flags.subtracting(.function) == shortcut.modifierFlags.subtracting(.function)
+    }
+
+    private func interruptHeldModifier() {
+        guard let held = heldModifier, !held.interrupted else { return }
+        heldModifier?.interrupted = true
+        dispatch { $0.onInterrupt?(held.action) }
+    }
+
+    /// Actions run after the tap callback returns, so the tap is never held up by app work.
+    private func dispatch(_ body: @escaping @MainActor (HotkeyCenter) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { if let self { body(self) } }
+        }
+    }
+
+    // MARK: Carbon
 
     fileprivate func handle(id: UInt32, released: Bool) {
         if id == Self.escapeID {
@@ -248,5 +464,19 @@ final class HotkeyCenter {
         if flags.contains(.control) { result |= UInt32(controlKey) }
         if flags.contains(.shift) { result |= UInt32(shiftKey) }
         return result
+    }
+
+    /// Test support: install bindings without a real tap so `handleKey` can be exercised directly.
+    func installForTesting(bindings: [ShortcutAction: [KeyShortcut]], onPress: @escaping (ShortcutAction) -> Void,
+                           onRelease: @escaping (ShortcutAction) -> Void, onInterrupt: @escaping (ShortcutAction) -> Void) {
+        stop()
+        self.onPress = onPress
+        self.onRelease = onRelease
+        self.onInterrupt = onInterrupt
+        for action in ShortcutAction.allCases {
+            for shortcut in bindings[action] ?? [] {
+                if shortcut.isModifierOnly { lone[shortcut.keyCode] = action } else { combos.append((shortcut, action)) }
+            }
+        }
     }
 }

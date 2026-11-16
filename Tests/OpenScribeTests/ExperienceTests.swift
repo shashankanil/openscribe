@@ -4,16 +4,21 @@ import OpenScribeObjC
 @testable import OpenScribe
 
 final class ExperienceTests: XCTestCase {
-    func testFreshAndIncompleteSetupAlwaysResume() {
+    func testSetupShowsUntilCompletedThenNeverAgainUnlessRequested() {
         let ready = SetupReadiness(microphone: true, accessibility: true, speechKey: true, pasteEnabled: true)
         XCTAssertTrue(ready.shouldPresent(completed: false))
         XCTAssertFalse(ready.shouldPresent(completed: true))
         XCTAssertTrue(ready.shouldPresent(completed: true, explicitlyRequested: true))
+        // Something missing after completion is a banner and a notice now, not a return to onboarding.
         for missing in [
             SetupReadiness(microphone: false, accessibility: true, speechKey: true, pasteEnabled: true),
             SetupReadiness(microphone: true, accessibility: false, speechKey: true, pasteEnabled: true),
             SetupReadiness(microphone: true, accessibility: true, speechKey: false, pasteEnabled: true)
-        ] { XCTAssertTrue(missing.shouldPresent(completed: true)) }
+        ] {
+            XCTAssertFalse(missing.shouldPresent(completed: true))
+            XCTAssertTrue(missing.shouldPresent(completed: false))
+            XCTAssertTrue(missing.shouldPresent(completed: true, explicitlyRequested: true))
+        }
         XCTAssertTrue(SetupReadiness(microphone: true, accessibility: false, speechKey: true, pasteEnabled: false).canDictate)
     }
 
@@ -79,12 +84,36 @@ final class ExperienceRenderingTests: XCTestCase {
                 controller.workspaceSection = section
                 try render(SettingsView(controller: controller, section: section), name: "\(section.rawValue)-\(name)", scheme: scheme, appearance: appearance, width: 672, height: 620)
             }
-            try render(OnboardingView(controller: controller), name: "setup-\(name)", scheme: scheme, appearance: appearance, width: 900, height: 620)
+            for step in OnboardingStep.allCases {
+                try render(OnboardingView(controller: controller, initialStep: step), name: "onboarding-\(step.rawValue)-\(name)", scheme: scheme,
+                           appearance: appearance, width: OnboardingView.windowSize.width, height: OnboardingView.windowSize.height)
+            }
             try render(QuickPanelView(controller: controller, close: {}), name: "quick-panel-\(name)", scheme: scheme, appearance: appearance, width: 340, height: 500)
         }
         XCTAssertEqual(controller.notes.count, 3)
         XCTAssertEqual(controller.notes.filter(\.isDailyNote).count, 2)
         XCTAssertTrue(controller.meetings.meetings.isEmpty)
+    }
+
+    func testNoticeBubbleRendersWithCloseButton() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("openscribe-notice-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = AppController(rootURL: root)
+        for (name, message) in [("short", "No speech was detected. Your recording is kept in Notes so you can retry."),
+                                ("long", "Provider request failed (HTTP 503): upstream overloaded, please retry later")] {
+            controller.notify(message)
+            try render(NoticeBubbleView(controller: controller, meetings: controller.meetings).fixedSize().background(Color(white: 0.85)),
+                       name: "notice-\(name)", scheme: .dark, appearance: .darkAqua, width: 360, height: 90)
+        }
+        controller.dismissNotice()
+    }
+
+    func testMeetingPillKeepsItsStopButtonEndFixed() {
+        let collapsed = FlowbarMode.meeting(paused: false, expanded: false)
+        let expanded = FlowbarMode.meeting(paused: false, expanded: true)
+        // The window shifts by half the growth, so the trailing end lands in the same place.
+        XCTAssertEqual(collapsed.width / 2 - collapsed.leadingGrowth / 2, expanded.width / 2 - expanded.leadingGrowth / 2)
+        XCTAssertEqual(FlowbarMode.dictating.leadingGrowth, 0)
     }
 
     private func render<Content: View>(_ content: Content, name: String, scheme: ColorScheme, appearance: NSAppearance.Name, width: CGFloat, height: CGFloat) throws {

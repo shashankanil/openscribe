@@ -355,6 +355,58 @@ struct ProviderClient {
         return bodyURL
     }
 
+    /// The outcome of checking a speech key with a small authenticated request.
+    enum KeyVerification: Equatable {
+        case ok
+        /// The provider refused the key (HTTP 401 or 403).
+        case unauthorized(status: Int)
+        /// The provider answered, but not in a way that says whether the key works (for example, a custom
+        /// server without a models list).
+        case unexpected(status: Int)
+        /// No answer: offline, a wrong address, or a timeout.
+        case unreachable(message: String)
+    }
+
+    /// Checks a transcription key without sending audio or spending credits: the cheapest authenticated
+    /// read each provider offers. Never throws; every failure maps to a state the UI can explain.
+    func verify(settings: AppSettings, key: String, timeout: TimeInterval = 15) async -> KeyVerification {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return .unauthorized(status: 0) }
+        var request: URLRequest
+        do {
+            switch settings.speechProvider {
+            case .openRouter:
+                // OpenRouter's model list is public, so it can't tell a bad key from a good one.
+                request = URLRequest(url: try url(base: settings.speechBaseURL, path: "/key"))
+                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            case .openAI, .groq, .mistral, .custom:
+                request = URLRequest(url: try url(base: settings.speechBaseURL, path: "/models"))
+                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            case .deepgram:
+                request = URLRequest(url: try url(base: settings.speechBaseURL, path: "/projects"))
+                request.setValue(key.hasPrefix("Token ") ? key : "Token \(key)", forHTTPHeaderField: "Authorization")
+            case .assemblyAI:
+                request = URLRequest(url: try url(base: settings.speechBaseURL, path: "/transcript?limit=1"))
+                request.setValue(key, forHTTPHeaderField: "Authorization")
+            }
+        } catch {
+            return .unreachable(message: ClientError.invalidURL.localizedDescription)
+        }
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeout
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .unexpected(status: 0) }
+            switch http.statusCode {
+            case 200..<300: return .ok
+            case 401, 403: return .unauthorized(status: http.statusCode)
+            default: return .unexpected(status: http.statusCode)
+            }
+        } catch {
+            return .unreachable(message: error.localizedDescription)
+        }
+    }
+
     private func url(base: String, path: String) throws -> URL {
         let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(trimmed)\(path)") else { throw ClientError.invalidURL }
