@@ -1,0 +1,36 @@
+/**
+ * OpenScribe Cloud: sync API + remote MCP server on Cloudflare Workers.
+ * See README.md for deploy steps. Secrets (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+ * COOKIE_ENCRYPTION_KEY, optional HOSTED_DOMAIN) are set with `wrangler secret put`.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openscribe-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    // Public origin of this Worker, no trailing slash. MCP tokens are bound to
+    // `${PUBLIC_URL}/mcp`, so set this to the deployed URL before `wrangler deploy`.
+    "PUBLIC_URL": "https://openscribe-cloud.shashankmay6.workers.dev",
+    // Linked from the landing page.
+    "APP_DOWNLOAD_URL": "https://github.com/shashankanil/openscribe/releases/latest"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "openscribe",
+      "database_id": "cbca0e95-5622-48bb-b60e-d6e344301515",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      // OAuth grants/tokens/clients (workers-oauth-provider) and short-lived login state.
+      "binding": "OAUTH_KV",
+      "id": "434204c7a50141c980f0384f847a5a70"
+    }
+  ],
+  "observability": { "enabled": true },
+  "dev": { "port": 8788 }
+}

@@ -71,6 +71,16 @@ final class StatusBarController: NSObject {
             menu.addItem(action("Open OpenScribe", #selector(openWorkspace)))
             menu.addItem(action("Meetings", #selector(openMeetings)))
             menu.addItem(action("Settings…", #selector(openSettings)))
+            let updates = UpdateController.shared
+            if let ready = updates.readyVersion {
+                let install = action("Install Update and Relaunch (\(ready))", #selector(installUpdate))
+                install.isEnabled = updates.canInstallNow
+                menu.addItem(install)
+            } else if updates.isAvailable {
+                let check = action("Check for Updates…", #selector(checkForUpdates))
+                check.isEnabled = updates.canCheckForUpdates
+                menu.addItem(check)
+            }
             menu.addItem(.separator())
             let capture = action(controller.capturePhase == .recording ? "Finish dictation" : "Start dictation", #selector(toggleCapture))
             capture.isEnabled = !controller.meetings.occupiesCapture && controller.capturePhase != .transcribing && controller.capturePhase != .cleaning
@@ -130,6 +140,8 @@ final class StatusBarController: NSObject {
     @objc private func openWorkspace() { controller.openWorkspace() }
     @objc private func openMeetings() { controller.workspaceSection = .meetings; controller.openMainWindow() }
     @objc private func openSettings() { controller.openSettings() }
+    @objc private func checkForUpdates() { UpdateController.shared.checkForUpdates() }
+    @objc private func installUpdate() { UpdateController.shared.installAndRelaunch() }
     @objc private func toggleCapture() { controller.toggleCapture() }
     @objc private func cancelCapture() { controller.cancelCapture() }
     @objc private func pasteLast() { controller.pasteLastDictation() }
@@ -146,6 +158,7 @@ final class StatusBarController: NSObject {
 
 struct QuickPanelView: View {
     @ObservedObject var controller: AppController
+    @ObservedObject private var updates = UpdateController.shared
     let close: () -> Void
     @State private var copiedID: UUID?
 
@@ -218,6 +231,12 @@ struct QuickPanelView: View {
                         HStack { FlowKeycaps(shortcut: hint); Text("tap or hold to dictate in any app").font(.system(size: 11)).foregroundStyle(FlowTheme.inkMuted) }
                             .frame(maxWidth: .infinity)
                     }
+                }
+            }
+            if let ready = updates.readyVersion {
+                FlowBanner(symbol: "arrow.down.circle", title: "Update ready", detail: "OpenScribe \(ready) is downloaded.") {
+                    Button("Relaunch") { close(); updates.installAndRelaunch() }.buttonStyle(.flow(.secondary, size: .small))
+                        .disabled(!updates.canInstallNow).help(updates.canInstallNow ? "Install and relaunch" : "Finish recording first")
                 }
             }
             if controller.hasFailedRecording {

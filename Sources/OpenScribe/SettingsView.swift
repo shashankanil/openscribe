@@ -7,6 +7,10 @@ struct SettingsView: View {
     @State private var showClearConfirmation = false
     var section: WorkspaceSection = .general
     @State private var recordingAction: ShortcutAction?
+    /// The shortcut being changed, or nil when adding another one.
+    @State private var replacingShortcut: KeyShortcut?
+    /// Feedback while recording, such as "Add a modifier".
+    @State private var captureMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -15,6 +19,7 @@ struct SettingsView: View {
             Group {
                 switch section {
                 case .connections: connectionsTab
+                case .ai: ContextAccessView(controller: controller, cloud: controller.cloud)
                 case .personalize: personalizationTab
                 case .shortcuts: shortcutsTab
                 case .privacy: privacyTab
@@ -66,6 +71,7 @@ struct SettingsView: View {
                         }
                     }
                 }
+                UpdateSettingsSection()
                 FlowSettingsGroup(title: "Recording") {
                     FlowSettingsRow(title: "Microphone", symbol: "mic") {
                         Picker("Microphone", selection: settingBinding(\.microphoneDeviceUID)) {
@@ -187,6 +193,7 @@ struct SettingsView: View {
     private var sectionSubtitle: String {
         switch section {
         case .connections: return "Manage your providers, API keys, and models in one place."
+        case .ai: return "Give Claude, ChatGPT and other AI tools your notes and meetings as context."
         case .personalize: return "Your vocabulary, snippets, and app preferences."
         case .shortcuts: return "Keys for dictation, meetings, and screenshots."
         case .privacy: return "Choose what stays on this Mac."
@@ -207,16 +214,8 @@ struct SettingsView: View {
     private var shortcutsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if !controller.hotkeyFailures.isEmpty {
-                    FlowBanner(symbol: "exclamationmark.triangle.fill", tint: FlowTheme.warning,
-                               title: "Some shortcuts aren’t active",
-                               detail: shortcutFailureDetail) {
-                        if controller.hotkeyFailures.contains(where: { controller.settings.shortcut(for: $0)?.isGlobe == true }) {
-                            Button("Permissions") { controller.workspaceSection = .permissions }.buttonStyle(.flow(.secondary, size: .small))
-                        }
-                    }
-                }
-                FlowSettingsGroup(title: "Dictation", footer: "A quick tap of the Dictate shortcut keeps recording until you tap again. Hold it to talk, and release to finish.") {
+                shortcutBanner
+                FlowSettingsGroup(title: "Dictation", footer: "Taps shorter than half a second are ignored, so a stray press never creates a note.") {
                     ForEach(Array(ShortcutAction.dictation.enumerated()), id: \.element) { index, action in
                         if index > 0 { FlowRowDivider() }
                         shortcutRow(action)
@@ -229,56 +228,108 @@ struct SettingsView: View {
                     }
                 }
                 HStack {
-                    Text("Shortcuts work in every app and don’t type into it.").font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
+                    Text("Each action can have several shortcuts. Click one to change it, or + to add another.")
+                        .font(.system(size: 12)).foregroundStyle(FlowTheme.inkMuted)
                     Spacer()
                     Button("Restore defaults") { recordingAction = nil; controller.resetShortcuts(); controller.flash("Shortcuts restored") }
                         .buttonStyle(.flowSecondary)
                 }
-                HotkeyCaptureView(isRecording: Binding(get: { recordingAction != nil }, set: { if !$0 { recordingAction = nil } })) { keyCode, modifiers, display in
+                HotkeyCaptureView(isRecording: Binding(get: { recordingAction != nil }, set: { if !$0 { recordingAction = nil } }),
+                                  onInvalid: { captureMessage = $0 }) { shortcut in
                     guard let action = recordingAction else { return }
-                    assign(KeyShortcut(keyCode: keyCode, modifiers: modifiers, display: display), to: action)
+                    add(shortcut, to: action, replacing: replacingShortcut)
                 }.frame(width: 0, height: 0)
             }
             .frame(maxWidth: 760).padding(.horizontal, 32).padding(.vertical, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onChange(of: recordingAction) { _, _ in captureMessage = nil }
     }
 
-    private var shortcutFailureDetail: String {
-        let names = controller.hotkeyFailures.map(\.title).joined(separator: ", ")
-        return "\(names). Globe needs Accessibility access; other keys may be taken by another app."
+    @ViewBuilder private var shortcutBanner: some View {
+        let reasons = controller.hotkeyFailureReasons
+        if reasons.values.contains(.needsAccessibility) {
+            FlowBanner(symbol: "lock.shield", tint: FlowTheme.warning, title: "Some shortcuts need Accessibility access",
+                       detail: "macOS only lets OpenScribe watch \(Self.list(reasons.filter { $0.value == .needsAccessibility }.map(\.key.display))) with Accessibility access.") {
+                Button("Allow access") { controller.permissions.openAccessibilitySettings() }.buttonStyle(.flow(.secondary, size: .small))
+            }
+        } else if !reasons.isEmpty {
+            FlowBanner(symbol: "exclamationmark.triangle.fill", tint: FlowTheme.warning, title: "Some shortcuts aren’t active",
+                       detail: "\(Self.list(reasons.map(\.key.display))) \(reasons.count == 1 ? "is" : "are") already used by another app or by macOS. Pick a different key.") { EmptyView() }
+        }
+    }
+
+    private static func list(_ items: [String]) -> String {
+        let sorted = items.sorted()
+        guard sorted.count > 1 else { return sorted.first ?? "" }
+        return sorted.dropLast().joined(separator: ", ") + " and " + sorted.last!
     }
 
     private func shortcutRow(_ action: ShortcutAction) -> some View {
-        let shortcut = controller.settings.shortcut(for: action)
+        let shortcuts = controller.settings.shortcuts(for: action)
         let recording = recordingAction == action
-        return FlowSettingsRow(title: action.title, detail: recording ? "Press the new shortcut. Escape cancels." : action.detail, symbol: action.symbol) {
-            if recording {
-                Text("Listening…").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.accent)
-            } else if let shortcut {
-                FlowKeycaps(shortcut: shortcut.display)
-                    .opacity(controller.hotkeyFailures.contains(action) ? 0.45 : 1)
-            } else {
-                Text("Not set").font(.system(size: 12)).foregroundStyle(FlowTheme.inkFaint)
+        let detail = recording ? (captureMessage ?? (action.usesRelease
+            ? "Press a key combination, or tap a single modifier such as Right ⌘. Escape cancels."
+            : "Press the new key combination. Escape cancels.")) : action.detail
+        return FlowSettingsRow(title: action.title, detail: detail, symbol: action.symbol) {
+            HStack(spacing: 6) {
+                ForEach(shortcuts, id: \.self) { shortcut in
+                    ShortcutChip(shortcut: shortcut, problem: controller.shortcutProblem(shortcut),
+                                 listening: recording && replacingShortcut == shortcut,
+                                 edit: { startRecording(action, replacing: shortcut) },
+                                 remove: { recordingAction = nil; controller.removeShortcut(shortcut, from: action) })
+                }
+                if recording && replacingShortcut == nil {
+                    Text("Listening…").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.accent)
+                        .padding(.horizontal, 8).frame(height: 23)
+                        .background(FlowTheme.accentSoft, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                } else if shortcuts.isEmpty {
+                    Text("Not set").font(.system(size: 12)).foregroundStyle(FlowTheme.inkFaint)
+                }
+                if recording {
+                    Button("Cancel") { recordingAction = nil }.buttonStyle(.flow(.secondary, size: .small))
+                } else {
+                    FlowIconButton(symbol: "plus", help: "Add a shortcut for \(action.title)") { startRecording(action, replacing: nil) }
+                }
+                Menu {
+                    if action.usesRelease {
+                        Section("Add a single key") {
+                            ForEach(ShortcutDefaults.holdPresets, id: \.self) { preset in
+                                Button(preset.display) { add(preset, to: action, replacing: nil) }
+                                    .disabled(shortcuts.contains(preset))
+                            }
+                        }
+                    }
+                    if let fallback = ShortcutDefaults.bindings[action] {
+                        Button("Use only the default (\(fallback.display))") { assign(fallback, to: action) }
+                    }
+                    Divider()
+                    Button("Remove all", role: .destructive) { assign(nil, to: action) }.disabled(shortcuts.isEmpty)
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("More options")
             }
-            Button(recording ? "Cancel" : shortcut == nil ? "Set" : "Change") { recordingAction = recording ? nil : action }
-                .buttonStyle(.flowSecondary)
-            Menu {
-                if action.usesRelease {
-                    Button("Use Globe (fn)") { assign(.globe, to: action) }
-                }
-                if let fallback = ShortcutDefaults.bindings[action] {
-                    Button("Use default (\(fallback.display))") { assign(fallback, to: action) }
-                }
-                Divider()
-                Button("Remove shortcut", role: .destructive) { assign(nil, to: action) }.disabled(shortcut == nil)
-            } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("More options")
+        }
+    }
+
+    private func startRecording(_ action: ShortcutAction, replacing: KeyShortcut?) {
+        replacingShortcut = replacing
+        captureMessage = nil
+        // Re-trigger the capture view even when switching between two chips of the same action.
+        if recordingAction == action { recordingAction = nil; DispatchQueue.main.async { recordingAction = action } }
+        else { recordingAction = action }
+    }
+
+    private func add(_ shortcut: KeyShortcut, to action: ShortcutAction, replacing: KeyShortcut?) {
+        recordingAction = nil
+        replacingShortcut = nil
+        if let displaced = controller.addShortcut(shortcut, to: action, replacing: replacing) {
+            controller.flash("\(shortcut.display) moved from “\(displaced.title)”")
         }
     }
 
     private func assign(_ shortcut: KeyShortcut?, to action: ShortcutAction) {
         recordingAction = nil
+        replacingShortcut = nil
         if let displaced = controller.assignShortcut(shortcut, to: action) {
             controller.flash("Removed from “\(displaced.title)”")
         }
@@ -376,19 +427,19 @@ private struct ThemeChoice: View {
 
 private struct HotkeyCaptureView: NSViewRepresentable {
     @Binding var isRecording: Bool
-    let onCapture: (UInt16, NSEvent.ModifierFlags, String) -> Void
+    let onInvalid: (String) -> Void
+    let onCapture: (KeyShortcut) -> Void
 
     func makeNSView(context: Context) -> HotkeyCaptureNSView {
         let view = HotkeyCaptureNSView()
-        view.onCancel = { isRecording = false }
-        view.onCapture = onCapture
-        view.isRecording = isRecording
+        updateNSView(view, context: context)
         return view
     }
 
     func updateNSView(_ nsView: HotkeyCaptureNSView, context: Context) {
         nsView.onCancel = { isRecording = false }
         nsView.onCapture = onCapture
+        nsView.onInvalid = onInvalid
         nsView.isRecording = isRecording
     }
 
@@ -397,37 +448,37 @@ private struct HotkeyCaptureView: NSViewRepresentable {
     }
 }
 
-private final class HotkeyCaptureNSView: NSView {
-    var onCapture: ((UInt16, NSEvent.ModifierFlags, String) -> Void)?
+/// Records the next shortcut typed while the Shortcuts page is listening. Global hotkeys are
+/// suspended meanwhile, so existing bindings can be re-recorded.
+///
+/// Accepts a key with modifiers, a function key on its own, or a single modifier pressed and
+/// released on its own (recorded with its side, such as Right ⌘).
+final class HotkeyCaptureNSView: NSView {
+    var onCapture: ((KeyShortcut) -> Void)?
+    var onInvalid: ((String) -> Void)?
     var onCancel: (() -> Void)?
     var isRecording = false {
         didSet {
-            if isRecording {
-                startRecording()
-            } else {
-                stopRecording()
-            }
+            guard isRecording != oldValue || (isRecording && monitor == nil) else { return }
+            if isRecording { startRecording() } else { stopRecording() }
         }
     }
 
     private var monitor: Any?
-    private var functionIsDown = false
+    /// A modifier that went down on its own; it becomes the shortcut if it is released untouched.
+    private var loneModifier: UInt16?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if isRecording {
-            startRecording()
-        }
+        if isRecording { startRecording() }
     }
 
     func stopRecording() {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
-        }
-        functionIsDown = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        loneModifier = nil
     }
 
     private func startRecording() {
@@ -435,36 +486,82 @@ private final class HotkeyCaptureNSView: NSView {
         window?.makeFirstResponder(self)
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self, self.isRecording else { return event }
-
-            if event.type == .flagsChanged {
-                let functionDown = event.modifierFlags.contains(.function)
-                defer { self.functionIsDown = functionDown }
-                if functionDown && !self.functionIsDown {
-                    self.capture(
-                        keyCode: 63,
-                        modifiers: event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers),
-                        characters: nil
-                    )
-                    return nil
-                }
-                return event
-            }
-
-            if event.keyCode == 53 { self.stopRecording(); self.onCancel?(); return nil }
-            let modifiers = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
-            guard !modifiers.isEmpty else { return event }
-            self.capture(keyCode: event.keyCode, modifiers: modifiers, characters: event.charactersIgnoringModifiers)
-            return nil
+            return self.handle(event) ? nil : event
         }
     }
 
-    private func capture(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, characters: String?) {
-        let display = ShortcutFormatter.display(keyCode: keyCode, modifiers: modifiers, characters: characters)
-        stopRecording()
-        onCapture?(keyCode, modifiers, display)
+    /// Returns true when the event was used.
+    func handle(_ event: NSEvent) -> Bool {
+        if event.type == .flagsChanged {
+            let code = event.keyCode
+            guard let key = KeyShortcut.modifierKeys[code] else { return false }
+            let flags = event.modifierFlags.intersection([.command, .control, .option, .shift, .function])
+            let down = UInt64(event.modifierFlags.rawValue) & key.device != 0 || (code == 63 && flags.contains(.function))
+            if down {
+                // Only a modifier pressed alone can become a single-key shortcut.
+                loneModifier = flags.subtracting(key.generic).subtracting(.function).isEmpty ? code : nil
+            } else if loneModifier == code {
+                loneModifier = nil
+                capture(KeyShortcut(keyCode: code, modifiers: []))
+            }
+            return true
+        }
+        loneModifier = nil
+        if event.keyCode == 53 { stopRecording(); onCancel?(); return true }
+        let modifiers = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
+        let display = ShortcutFormatter.display(keyCode: event.keyCode, modifiers: modifiers, characters: event.charactersIgnoringModifiers)
+        let shortcut = KeyShortcut(keyCode: event.keyCode, modifiers: modifiers, display: display)
+        guard shortcut.isUsable else {
+            onInvalid?("Add a modifier such as ⌘, ⌥ or ⌃ so typing “\(display)” still works, or use an F-key.")
+            return true
+        }
+        capture(shortcut)
+        return true
     }
 
-    deinit {
+    private func capture(_ shortcut: KeyShortcut) {
         stopRecording()
+        onCapture?(shortcut)
+    }
+
+    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+}
+
+/// One shortcut in a row: click to change it, × to remove it.
+private struct ShortcutChip: View {
+    let shortcut: KeyShortcut
+    let problem: String?
+    let listening: Bool
+    let edit: () -> Void
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if listening {
+                Text("Listening…").font(.system(size: 12, weight: .medium)).foregroundStyle(FlowTheme.accent).padding(.horizontal, 4)
+            } else {
+                if problem != nil {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(FlowTheme.warning)
+                }
+                FlowKeycaps(shortcut: shortcut.display).opacity(problem == nil ? 1 : 0.5)
+                Button(action: remove) {
+                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(FlowTheme.inkMuted)
+                        .frame(width: 16, height: 16).background(FlowTheme.surfaceMuted, in: Circle()).contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .opacity(hovering ? 1 : 0)
+                .help("Remove \(shortcut.display)")
+                .accessibilityLabel("Remove \(shortcut.display)")
+            }
+        }
+        .padding(.leading, 3).padding(.trailing, 2).padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hovering || listening ? FlowTheme.surfaceMuted : .clear))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: edit)
+        .help(problem ?? "Click to change")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
     }
 }

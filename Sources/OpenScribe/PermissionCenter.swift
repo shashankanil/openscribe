@@ -2,12 +2,15 @@ import AVFoundation
 import AppKit
 import ApplicationServices
 import Combine
+import CoreGraphics
 import Foundation
 
 @MainActor
 final class PermissionCenter: ObservableObject {
     @Published private(set) var microphoneStatus: AVAuthorizationStatus = .notDetermined
     @Published private(set) var accessibilityTrusted = false
+    /// Screen & System Audio Recording, used for call audio and screenshots.
+    @Published private(set) var screenRecordingGranted = false
 
     /// Called after a permission actually changes, so listeners can react (for example, re-register shortcuts).
     var onChange: (() -> Void)?
@@ -35,6 +38,9 @@ final class PermissionCenter: ObservableObject {
         let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
+        let screen = CGPreflightScreenCaptureAccess()
+        // Screen recording isn't used for dictation or shortcuts, so it doesn't notify listeners.
+        if screen != screenRecordingGranted { screenRecordingGranted = screen }
         guard microphone != microphoneStatus || trusted != accessibilityTrusted else { return }
         if microphone != microphoneStatus { microphoneStatus = microphone }
         if trusted != accessibilityTrusted { accessibilityTrusted = trusted }
@@ -68,6 +74,25 @@ final class PermissionCenter: ObservableObject {
         openPrivacyPane("Privacy_Accessibility")
         beginAccessibilityMonitoring()
     }
+    /// Asks macOS to add OpenScribe to the Accessibility list and show its own dialog, then opens the pane
+    /// and watches for the switch. Without the prompt a fresh install may be missing from the list.
+    func requestAccessibilityPrompt() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        if AXIsProcessTrustedWithOptions(options) { refresh(); return }
+        openAccessibilitySettings()
+    }
+
+    /// The first request shows the system prompt; once it has been answered, the pane is the only way.
+    func requestScreenRecording() {
+        defer { refresh() }
+        if CGPreflightScreenCaptureAccess() { return }
+        let askedKey = "screen-recording-requested-v1"
+        // The call returns before the user answers, so only the first request relies on the prompt.
+        if UserDefaults.standard.bool(forKey: askedKey) { openPrivacyPane("Privacy_ScreenCapture"); return }
+        UserDefaults.standard.set(true, forKey: askedKey)
+        _ = CGRequestScreenCaptureAccess()
+    }
+
     func beginAccessibilityMonitoring() {
         accessibilityRefreshTask?.cancel()
         accessibilityRefreshTask = Task { @MainActor [weak self] in

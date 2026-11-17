@@ -68,6 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        if CommandLine.arguments.contains("--update-smoke") {
+            // Checks the feed, installs any verified update without relaunching, prints a result line, and exits.
+            maintenanceMode = true
+            Task { @MainActor in UpdateController.shared.runSmokeTest() }
+            return
+        }
+
         let identity = Bundle.main.bundleIdentifier ?? "org.open-source.openscribe"
         if NSRunningApplication.runningApplications(withBundleIdentifier: identity).contains(where: {
             $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
@@ -88,6 +95,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         AppController.shared.boot()
         statusBarController = StatusBarController(controller: .shared)
+        Task { @MainActor in
+            // Release .app builds only; DEBUG, `swift run`, and tests never start the updater.
+            UpdateController.shared.isBusy = { AppController.shared.isDictationBusy || AppController.shared.meetings.occupiesCapture }
+            UpdateController.shared.start()
+        }
         if CommandLine.arguments.contains("--show-workspace") { AppController.shared.openMainWindow() }
         #if DEBUG
         if CommandLine.arguments.contains("--show-quick-panel") { statusBarController?.showQuickPanel() }

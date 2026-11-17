@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import SwiftUI
 
 struct PermissionsView: View {
@@ -7,7 +6,6 @@ struct PermissionsView: View {
     @ObservedObject private var permissions: PermissionCenter
     @ObservedObject private var calendar: CalendarMeetingController
     @State private var requestingMicrophone = false
-    @State private var systemAudioReady = CGPreflightScreenCaptureAccess()
 
     init(controller: AppController) {
         self.controller = controller
@@ -20,7 +18,7 @@ struct PermissionsView: View {
             VStack(alignment: .leading, spacing: 22) {
                 Text("Give OpenScribe the access you need. You control each permission in macOS.")
                     .font(.system(size: 13)).foregroundStyle(FlowTheme.inkMuted)
-                FlowSettingsGroup(title: "Dictation", footer: "The microphone is used only when you start a recording. Accessibility enables pasting and your global shortcut.") {
+                FlowSettingsGroup(title: "Dictation", footer: "The microphone is used only when you start a recording. Accessibility lets OpenScribe type into the app you’re using and watch shortcuts macOS otherwise reserves, such as ⌥ Space or Right ⌘.") {
                     FlowSettingsRow(title: "Microphone", detail: "Record your voice", symbol: "mic") {
                         permissionStatus(permissions.microphoneReady)
                         if !permissions.microphoneReady {
@@ -30,10 +28,10 @@ struct PermissionsView: View {
                         }
                     }
                     FlowRowDivider()
-                    FlowSettingsRow(title: "Accessibility", detail: "Type into other apps and use your shortcut", symbol: "text.cursor") {
+                    FlowSettingsRow(title: "Accessibility", detail: "Type into other apps and use every kind of shortcut", symbol: "text.cursor") {
                         permissionStatus(permissions.accessibilityTrusted)
                         if !permissions.accessibilityTrusted {
-                            Button("Open Settings") { controller.openAccessibilitySettings() }.buttonStyle(.flowSecondary)
+                            Button("Open Settings") { permissions.requestAccessibilityPrompt() }.buttonStyle(.flowSecondary)
                         }
                     }
                 }
@@ -55,8 +53,10 @@ struct PermissionsView: View {
                 }
                 FlowSettingsGroup(title: "Meetings & calendar", footer: "These are optional for dictation. System audio includes other apps and notifications. Calendar access reads events and never changes them.") {
                     FlowSettingsRow(title: "Screen & system audio", detail: "Capture the other side of your calls", symbol: "speaker.wave.2") {
-                        permissionStatus(systemAudioReady)
-                        Button("Open Settings") { openScreenSettings() }.buttonStyle(.flowSecondary)
+                        permissionStatus(permissions.screenRecordingGranted)
+                        if !permissions.screenRecordingGranted {
+                            Button("Allow") { permissions.requestScreenRecording() }.buttonStyle(.flowSecondary)
+                        }
                     }
                     FlowRowDivider()
                     FlowSettingsRow(title: "Calendar", detail: "Browse your schedule and prompt before meetings", symbol: "calendar") {
@@ -77,9 +77,11 @@ struct PermissionsView: View {
                 }
             }.padding(.horizontal, 28).padding(.vertical, 24)
         }
+        // Permissions change in System Settings, so keep checking while this page is open. The check is
+        // cheap and publishes only real changes.
         .task {
             while !Task.isCancelled {
-                check()
+                permissions.refresh()
                 do { try await Task.sleep(nanoseconds: 1_500_000_000) } catch { return }
             }
         }
@@ -97,17 +99,7 @@ struct PermissionsView: View {
         Task { await controller.requestMicrophonePermission(); requestingMicrophone = false }
     }
 
-    /// Cheap and quiet: only real changes redraw anything.
-    private func check() {
-        permissions.refresh()
-        let screen = CGPreflightScreenCaptureAccess()
-        if screen != systemAudioReady { systemAudioReady = screen }
-    }
-
     private func refresh() {
         controller.refreshPermissions()
-        systemAudioReady = CGPreflightScreenCaptureAccess()
     }
-
-    private func openScreenSettings() { PermissionCenter.openPrivacyPane("Privacy_ScreenCapture") }
 }

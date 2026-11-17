@@ -378,7 +378,10 @@ private struct NoteListRow: View, Equatable {
                         }
                     } else {
                         Image(systemName: "text.alignleft").font(.system(size: 9))
-                        Text(note.createdAt.formatted(date: .abbreviated, time: .omitted))
+                        // Rows are already grouped by day, so recent notes show their time instead of the date again.
+                        Text(Calendar.current.isDateInToday(note.createdAt) || Calendar.current.isDateInYesterday(note.createdAt)
+                             ? note.createdAt.formatted(date: .omitted, time: .shortened)
+                             : note.createdAt.formatted(date: .abbreviated, time: .omitted))
                     }
                 }.font(.system(size: 10.5)).foregroundStyle(FlowTheme.inkFaint)
             }.frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)

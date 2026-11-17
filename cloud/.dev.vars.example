@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit real values.
+GOOGLE_CLIENT_ID=<google oauth web client id>
+GOOGLE_CLIENT_SECRET=<google oauth web client secret>
+# At least 32 characters, e.g. `openssl rand -hex 32`
+COOKIE_ENCRYPTION_KEY=<random 64 hex chars>
+# Optional: restrict sign-in to one Google Workspace domain, e.g. example.com
+# HOSTED_DOMAIN=
