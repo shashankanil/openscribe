@@ -111,7 +111,7 @@ describe("/app/login", () => {
 
     const me = await call("/api/v1/me", bearer(token));
     expect(me.status).toBe(200);
-    expect(await me.json()).toEqual({ email: "google-sub-1@example.com", name: "Test User", documentCount: 0, lastSyncAt: null });
+    expect(await me.json()).toEqual({ email: "google-sub-1@example.com", name: "Test User", documentCount: 0, lastSyncAt: null, attachmentCount: 0, attachmentBytes: 0 });
   });
 
   it("passes a Google error back to the app with its state", async () => {
@@ -291,7 +291,7 @@ describe("remote MCP over OAuth", () => {
 
     const list = await rpcJson(tokenA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const tools = list.result.tools as { name: string; annotations: { readOnlyHint: boolean } }[];
-    expect(tools.map((t) => t.name).sort()).toEqual(["fetch", "get_meeting", "list_action_items", "list_recent", "search"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["fetch", "get_attachment", "get_meeting", "list_action_items", "list_recent", "search"]);
     expect(tools.every((t) => t.annotations.readOnlyHint)).toBe(true);
 
     const searchCall = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search", arguments: { query: "pelican" } } };
@@ -300,15 +300,41 @@ describe("remote MCP over OAuth", () => {
     const b = await rpcJson(tokenB, searchCall);
     expect(b.result.structuredContent.results).toEqual([]);
 
+    // Attachments: image content and resource links pass through the SDK unchanged; other users can't see them.
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), (ch) => ch.charCodeAt(0));
+    const audio = new Uint8Array(2048).fill(7);
+    for (const [id, bytes, type, kind] of [["shot", png, "image/png", "screenshot"], ["rec", audio, "audio/mp4", "recording"]] as const) {
+      const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((x) => x.toString(16).padStart(2, "0")).join("");
+      const put = await call(`/api/v1/attachments/mine/${id}`, bearer(appToken, {
+        method: "PUT",
+        body: bytes,
+        headers: { "Content-Type": type, "Content-Length": String(bytes.byteLength), "X-OpenScribe-Kind": kind, "X-OpenScribe-Sha256": digest },
+      }));
+      expect(put.status).toBe(201);
+    }
+    const attCall = (name: string, args: unknown) => ({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name, arguments: args } });
+    const fetched = await rpcJson(tokenA, attCall("fetch", { id: "mine" }));
+    expect(fetched.result.structuredContent.attachments.map((x: { id: string }) => x.id).sort()).toEqual(["rec", "shot"]);
+    const image = await rpcJson(tokenA, attCall("get_attachment", { documentId: "mine", id: "shot" }));
+    expect(image.result.content[0]).toMatchObject({ type: "image", mimeType: "image/png", data: btoa(String.fromCharCode(...png)) });
+    const link = await rpcJson(tokenA, attCall("get_attachment", { documentId: "mine", id: "rec" }));
+    expect(link.result.content[1]).toMatchObject({ type: "resource_link", mimeType: "audio/mp4", size: 2048 });
+    const media = await call(new URL(link.result.content[1].uri).pathname);
+    expect(media.status).toBe(200);
+    expect((await media.arrayBuffer()).byteLength).toBe(2048);
+    const denied = await rpcJson(tokenB, attCall("get_attachment", { documentId: "mine", id: "shot" }));
+    expect(denied.result.isError).toBe(true);
+
     // DELETE /account wipes documents and tokens and revokes OAuth grants.
     const del = await call("/api/v1/account", bearer(appToken, { method: "DELETE" }));
     expect(del.status).toBe(200);
     expect((await call("/api/v1/me", bearer(appToken))).status).toBe(401);
     expect((await rpc(tokenA, searchCall)).status).toBe(401);
+    expect((await env.MEDIA.list({ prefix: "u/sub-a/" })).objects).toEqual([]);
     const counts = await env.DB.prepare(
-      "SELECT (SELECT COUNT(*) FROM documents WHERE user_id = 'sub-a') AS d, (SELECT COUNT(*) FROM app_tokens WHERE user_id = 'sub-a') AS t, (SELECT COUNT(*) FROM users WHERE id = 'sub-a') AS u",
+      "SELECT (SELECT COUNT(*) FROM attachments WHERE user_id = 'sub-a') AS a, (SELECT COUNT(*) FROM documents WHERE user_id = 'sub-a') AS d, (SELECT COUNT(*) FROM app_tokens WHERE user_id = 'sub-a') AS t, (SELECT COUNT(*) FROM users WHERE id = 'sub-a') AS u",
     ).first();
-    expect(counts).toEqual({ d: 0, t: 0, u: 0 });
+    expect(counts).toEqual({ a: 0, d: 0, t: 0, u: 0 });
     // User B is unaffected.
     expect((await rpc(tokenB, searchCall)).status).toBe(200);
   });

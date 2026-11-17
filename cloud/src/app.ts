@@ -16,10 +16,26 @@ import {
   validateAppLoginParams,
   type AppPrincipal,
 } from "./app-auth";
+import {
+  deleteAttachment,
+  getAttachmentRow,
+  isValidId,
+  listAttachmentRows,
+  MAX_ATTACHMENT_BYTES,
+  MAX_CAPTION_CHARS,
+  MEDIA_TYPES,
+  purgeTombstonedAttachments,
+  purgeUserMedia,
+  r2Key,
+  updateAttachmentMetadata,
+  upsertAttachmentRow,
+  usedBytes,
+} from "./attachments";
 import { randomToken } from "./crypto";
 import { deleteDocument, MAX_BATCH_BYTES, MAX_DOCUMENTS_PER_BATCH, upsertDocuments } from "./documents";
 import { exchangeGoogleCode, googleAuthorizeUrl, GoogleAuthError, upsertUser } from "./google";
 import { consentPage, errorPage, HTML_HEADERS, landingPage, privacyPage, termsPage } from "./html";
+import { serveMedia } from "./media";
 
 export type Bindings = Env & { OAUTH_PROVIDER: OAuthHelpers };
 type Variables = { principal: AppPrincipal };
@@ -109,6 +125,9 @@ app.get("/privacy", (c) => c.html(privacyPage(), 200, { ...HTML_HEADERS, "Cache-
 app.get("/terms", (c) => c.html(termsPage(), 200, { ...HTML_HEADERS, "Cache-Control": "public, max-age=3600" }));
 
 app.get("/healthz", (c) => c.json({ ok: true }));
+
+/** Signed attachment URLs (see media.ts). Authorized by the token itself, not a header. */
+app.get("/media/:token", (c) => serveMedia(c.env, c.req.raw, c.req.param("token")));
 
 // ---------------------------------------------------------------------------------------------
 // OAuth for MCP clients: consent (per client), then Google, then completeAuthorization.
@@ -237,17 +256,21 @@ api.get("/me", async (c) => {
   const { userId } = c.get("principal");
   const row = await c.env.DB.prepare(
     `SELECT u.email, u.name, u.last_sync_at,
-            (SELECT COUNT(*) FROM documents d WHERE d.user_id = u.id AND d.deleted = 0) AS document_count
+            (SELECT COUNT(*) FROM documents d WHERE d.user_id = u.id AND d.deleted = 0) AS document_count,
+            (SELECT COUNT(*) FROM attachments a WHERE a.user_id = u.id) AS attachment_count,
+            (SELECT COALESCE(SUM(bytes), 0) FROM attachments a WHERE a.user_id = u.id) AS attachment_bytes
      FROM users u WHERE u.id = ?1`,
   )
     .bind(userId)
-    .first<{ email: string; name: string; last_sync_at: number | null; document_count: number }>();
+    .first<{ email: string; name: string; last_sync_at: number | null; document_count: number; attachment_count: number; attachment_bytes: number }>();
   if (!row) return jsonError(401, "unauthorized");
   return c.json({
     email: row.email,
     name: row.name,
     documentCount: row.document_count,
     lastSyncAt: row.last_sync_at === null ? null : new Date(row.last_sync_at).toISOString(),
+    attachmentCount: row.attachment_count,
+    attachmentBytes: row.attachment_bytes,
   });
 });
 
@@ -265,14 +288,19 @@ api.post("/documents/batch", async (c) => {
   if (documents.length > MAX_DOCUMENTS_PER_BATCH) {
     return jsonError(413, "too_many_documents", `At most ${MAX_DOCUMENTS_PER_BATCH} documents per request`);
   }
-  const result = await upsertDocuments(c.env.DB, c.get("principal").userId, documents);
+  const { userId } = c.get("principal");
+  const result = await upsertDocuments(c.env.DB, userId, documents);
+  const tombstoned = documents.flatMap((d) => (d?.deleted === true && typeof d.id === "string" ? [d.id as string] : []));
+  if (tombstoned.length > 0) await purgeTombstonedAttachments(c.env, userId, tombstoned);
   return c.json(result);
 });
 
 api.delete("/documents/:id", async (c) => {
   const id = c.req.param("id");
   if (!id || id.length > 200) return jsonError(400, "invalid_request");
-  await deleteDocument(c.env.DB, c.get("principal").userId, id);
+  const { userId } = c.get("principal");
+  await deleteDocument(c.env.DB, userId, id);
+  await purgeTombstonedAttachments(c.env, userId, [id]);
   return c.json({ deleted: true });
 });
 
@@ -290,12 +318,117 @@ api.delete("/account", async (c) => {
     for (const grant of page.items) await oauth.revokeGrant(grant.id, userId);
     cursor = page.cursor;
   } while (cursor);
+  await purgeUserMedia(c.env.MEDIA, userId);
   await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM attachments WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM documents WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM app_tokens WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM users WHERE id = ?1").bind(userId),
   ]);
   return c.json({ deleted: true });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Attachments (screenshots, recordings) in R2
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const DEFAULT_MEDIA_QUOTA_BYTES = 5 * 1024 ** 3;
+
+api.put("/attachments/:documentId/:attachmentId", async (c) => {
+  const { userId } = c.get("principal");
+  const documentId = c.req.param("documentId");
+  const id = c.req.param("attachmentId");
+  if (!isValidId(documentId) || !isValidId(id)) return jsonError(400, "invalid_request", "Invalid document or attachment id");
+
+  const contentType = (c.req.header("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!(contentType in MEDIA_TYPES)) return jsonError(415, "unsupported_media_type", `Allowed: ${Object.keys(MEDIA_TYPES).join(", ")}`);
+  const kind = c.req.header("X-OpenScribe-Kind");
+  if (kind !== "screenshot" && kind !== "recording") return jsonError(400, "invalid_kind", "X-OpenScribe-Kind must be screenshot or recording");
+  if (!contentType.startsWith(kind === "screenshot" ? "image/" : "audio/")) {
+    return jsonError(400, "invalid_kind", `A ${kind} can't have Content-Type ${contentType}`);
+  }
+  const sha256 = (c.req.header("X-OpenScribe-Sha256") ?? "").toLowerCase();
+  if (!SHA256_PATTERN.test(sha256)) return jsonError(400, "invalid_sha256", "X-OpenScribe-Sha256 must be 64 hex characters");
+
+  const createdHeader = c.req.header("X-OpenScribe-Created-At");
+  const createdAt = createdHeader === undefined ? undefined : Date.parse(createdHeader);
+  if (Number.isNaN(createdAt)) return jsonError(400, "invalid_request", "X-OpenScribe-Created-At must be ISO-8601");
+  const durationHeader = c.req.header("X-OpenScribe-Duration");
+  const durationSeconds = durationHeader === undefined ? undefined : Number(durationHeader);
+  if (durationSeconds !== undefined && (!durationHeader!.trim() || !Number.isFinite(durationSeconds) || durationSeconds < 0)) {
+    return jsonError(400, "invalid_request", "X-OpenScribe-Duration must be seconds >= 0");
+  }
+  const captionHeader = c.req.header("X-OpenScribe-Caption");
+  let caption: string | undefined;
+  try {
+    if (captionHeader !== undefined) caption = Array.from(decodeURIComponent(captionHeader)).slice(0, MAX_CAPTION_CHARS).join("");
+  } catch {
+    return jsonError(400, "invalid_request", "X-OpenScribe-Caption must be percent-encoded UTF-8");
+  }
+
+  const lengthHeader = c.req.header("Content-Length");
+  if (!lengthHeader || !/^\d+$/.test(lengthHeader)) return jsonError(411, "length_required");
+  const bytes = Number(lengthHeader);
+  if (bytes > MAX_ATTACHMENT_BYTES) return jsonError(413, "too_large", `At most ${MAX_ATTACHMENT_BYTES} bytes`);
+  if (bytes === 0 || !c.req.raw.body) return jsonError(400, "empty_body");
+
+  const doc = await c.env.DB.prepare("SELECT 1 AS ok FROM documents WHERE user_id = ?1 AND id = ?2 AND deleted = 0").bind(userId, documentId).first();
+  if (!doc) return jsonError(404, "document_not_found");
+
+  const existing = await getAttachmentRow(c.env.DB, userId, documentId, id);
+  if (existing?.sha256 === sha256) {
+    await updateAttachmentMetadata(c.env.DB, userId, documentId, id, { kind, createdAt, durationSeconds, caption });
+    return c.json({ id, documentId, kind, bytes: existing.bytes, sha256 }, 200);
+  }
+
+  const quota = Number(c.env.MEDIA_QUOTA_BYTES) || DEFAULT_MEDIA_QUOTA_BYTES;
+  if ((await usedBytes(c.env.DB, userId, { documentId, id })) + bytes > quota) {
+    return jsonError(413, "quota_exceeded", `Storage is limited to ${quota} bytes per account`);
+  }
+
+  try {
+    // FixedLengthStream gives R2 the length up front and fails the put if the body is short or long.
+    const body = c.req.raw.body.pipeThrough(new FixedLengthStream(bytes));
+    await c.env.MEDIA.put(r2Key(userId, documentId, id), body, { httpMetadata: { contentType }, sha256 });
+  } catch (error) {
+    if (/sha-?256|checksum|digest/i.test(String(error))) return jsonError(400, "checksum_mismatch");
+    throw error;
+  }
+  await upsertAttachmentRow(c.env.DB, userId, {
+    documentId,
+    id,
+    kind,
+    contentType,
+    bytes,
+    sha256,
+    createdAt: createdAt ?? Date.now(),
+    durationSeconds: durationSeconds ?? 0,
+    caption: caption ?? "",
+  });
+  return c.json({ id, documentId, kind, bytes, sha256 }, 201);
+});
+
+api.get("/attachments", async (c) => {
+  const rows = await listAttachmentRows(c.env.DB, c.get("principal").userId);
+  return c.json({
+    attachments: rows.map((r) => ({
+      id: r.id,
+      documentId: r.document_id,
+      kind: r.kind,
+      contentType: r.content_type,
+      bytes: r.bytes,
+      sha256: r.sha256,
+      createdAt: new Date(r.created_at).toISOString(),
+    })),
+  });
+});
+
+api.delete("/attachments/:documentId/:attachmentId", async (c) => {
+  const documentId = c.req.param("documentId");
+  const id = c.req.param("attachmentId");
+  if (!isValidId(documentId) || !isValidId(id)) return jsonError(400, "invalid_request");
+  await deleteAttachment(c.env, c.get("principal").userId, documentId, id);
+  return c.body(null, 204);
 });
 
 app.route("/api/v1", api);

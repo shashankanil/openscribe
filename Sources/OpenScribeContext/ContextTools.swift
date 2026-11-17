@@ -1,17 +1,19 @@
 import Foundation
 
-/// The five read-only MCP tools defined in docs/CONTEXT-API.md.
+/// The read-only MCP tools defined in docs/CONTEXT-API.md.
 public enum ContextTools {
     public struct Result: Equatable, Sendable {
         public var text: String
         public var structured: JSONValue?
         public var isError: Bool
+        /// Content items after the text, such as an image.
+        public var extraContent: [JSONValue] = []
 
         public static func error(_ message: String) -> Result { Result(text: message, structured: nil, isError: true) }
 
         /// MCP `CallToolResult`.
         public var json: JSONValue {
-            var object: [String: JSONValue] = ["content": [["type": "text", "text": .string(text)]]]
+            var object: [String: JSONValue] = ["content": .array([["type": "text", "text": .string(text)]] + extraContent)]
             if let structured { object["structuredContent"] = structured }
             if isError { object["isError"] = true }
             return .object(object)
@@ -27,7 +29,10 @@ public enum ContextTools {
     /// Bodies longer than this are cut in `list_recent` (use `fetch` for the full text).
     public static let listBodyLimit = 2_000
 
-    public static let names = ["search", "fetch", "list_recent", "get_meeting", "list_action_items"]
+    public static let names = ["search", "fetch", "list_recent", "get_meeting", "list_action_items", "get_attachment"]
+
+    /// Screenshots up to this size are returned inline as images.
+    public static let inlineImageLimit = 5_000_000
 
     // MARK: Definitions
 
@@ -132,6 +137,35 @@ public enum ContextTools {
                 ],
                 "annotations": readOnly,
             ],
+            [
+                "name": "get_attachment",
+                "title": "Get attachment",
+                "description": "Get a screenshot (returned as an image) or a meeting recording (returned as file locations) attached to a note or meeting. Attachment ids are listed by `fetch` and `get_meeting`.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "documentId": ["type": "string", "description": "The note or meeting id."],
+                        "id": ["type": "string", "description": "Attachment id from `fetch` or `get_meeting`."],
+                    ],
+                    "required": ["documentId", "id"],
+                ],
+                "outputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "id": ["type": "string"],
+                        "kind": ["type": "string", "enum": ["screenshot", "recording"]],
+                        "contentType": ["type": "string"],
+                        "bytes": ["type": "integer"],
+                        "createdAt": dateTime,
+                        "durationSeconds": ["type": "number"],
+                        "caption": ["type": "string"],
+                        "url": ["type": "string"],
+                        "files": stringArray,
+                    ],
+                    "required": ["id", "kind", "contentType", "bytes", "createdAt"],
+                ],
+                "annotations": readOnly,
+            ],
         ]
     }
 
@@ -206,6 +240,7 @@ public enum ContextTools {
         case "list_recent": return listRecent(arguments, library: library, now: now)
         case "get_meeting": return getMeeting(arguments, library: library)
         case "list_action_items": return listActionItems(arguments, library: library, now: now)
+        case "get_attachment": return getAttachment(arguments, library: library)
         default: throw CallError.unknownTool(name)
         }
     }
@@ -264,8 +299,14 @@ public enum ContextTools {
                 throw ArgumentError.message("No note or meeting with id \(id). Use `search` or `list_recent` to find ids.")
             }
             document.transcript = document.transcript.map { truncateTranscript($0).text }
-            return Result(text: markdown(document, status: library.meetingInfo[document.id]?.status),
-                          structured: try JSONValue.encoding(document), isError: false)
+            let attachments = library.attachments[document.id] ?? []
+            var structured = try JSONValue.encoding(document)
+            if case .object(var object) = structured {
+                object["attachments"] = .array(attachments.map(attachmentJSON))
+                structured = .object(object)
+            }
+            return Result(text: markdown(document, status: library.meetingInfo[document.id]?.status) + attachmentsMarkdown(attachments),
+                          structured: structured, isError: false)
         }
     }
 
@@ -331,10 +372,11 @@ public enum ContextTools {
                 "notes": .string(document.body),
                 "transcript": transcript.map(JSONValue.string) ?? .null,
                 "transcriptTruncated": .bool(truncated),
+                "attachments": .array((library.attachments[document.id] ?? []).map(attachmentJSON)),
             ]
             var shown = document
             shown.transcript = transcript
-            var text = markdown(shown, status: status)
+            var text = markdown(shown, status: status) + attachmentsMarkdown(library.attachments[document.id] ?? [])
             if !includeTranscript && document.transcript != nil {
                 text += "\n\n(Transcript available: call `get_meeting` with includeTranscript: true.)"
             }
@@ -362,6 +404,64 @@ public enum ContextTools {
             let header = "\(items.count) action item\(items.count == 1 ? "" : "s") from \(meetings.count) meeting\(meetings.count == 1 ? "" : "s") in the last \(days) day\(days == 1 ? "" : "s")."
             return Result(text: ([header] + lines).joined(separator: "\n"), structured: ["actionItems": .array(items)], isError: false)
         }
+    }
+
+    static func getAttachment(_ arguments: [String: JSONValue], library: ContextLibrary) -> Result {
+        guarded {
+            let documentID = try requiredString(arguments, "documentId")
+            let id = try requiredString(arguments, "id")
+            guard let attachment = library.attachment(documentID: documentID, id: id) else {
+                throw ArgumentError.message("No attachment \(id) on \(documentID). `fetch` or `get_meeting` lists attachment ids.")
+            }
+            let structured = attachmentJSON(attachment)
+            switch attachment.kind {
+            case .screenshot:
+                guard let url = attachment.parts.first?.url else { throw ArgumentError.message("The screenshot file is missing.") }
+                var text = "Screenshot from \(readable(attachment.createdAt))"
+                if !attachment.caption.isEmpty { text += " · \(attachment.caption)" }
+                text += "\nFile: \(url.path)"
+                guard attachment.totalBytes <= inlineImageLimit, let data = try? Data(contentsOf: url) else {
+                    return Result(text: text + "\n(Too large to show inline.)", structured: structured, isError: false)
+                }
+                let image: JSONValue = ["type": "image", "data": .string(data.base64EncodedString()), "mimeType": .string(attachment.localContentType)]
+                return Result(text: text, structured: structured, isError: false, extraContent: [image])
+            case .recording:
+                var lines = ["Recording of \(attachment.caption), \(duration(attachment.durationSeconds)), as WAV files on this Mac.",
+                             "Each file starts at the given time in the meeting. The transcript is available with `get_meeting`."]
+                for part in attachment.parts {
+                    lines.append("- [\(ContextNormalizer.timestamp(part.start))] \(part.track ?? "audio"): \(part.url.path)")
+                }
+                return Result(text: lines.joined(separator: "\n"), structured: structured, isError: false)
+            }
+        }
+    }
+
+    static func attachmentJSON(_ attachment: ContextAttachment) -> JSONValue {
+        var object: [String: JSONValue] = [
+            "id": .string(attachment.id),
+            "kind": .string(attachment.kind.rawValue),
+            "contentType": .string(attachment.localContentType),
+            "bytes": .int(attachment.totalBytes),
+            "createdAt": .string(ContextDate.string(attachment.createdAt)),
+            "durationSeconds": .double(attachment.durationSeconds),
+            "caption": .string(attachment.caption),
+        ]
+        if attachment.kind == .screenshot, let url = attachment.parts.first?.url { object["url"] = .string(url.absoluteString) }
+        else { object["files"] = .array(attachment.parts.map { .string($0.url.absoluteString) }) }
+        return .object(object)
+    }
+
+    static func attachmentsMarkdown(_ attachments: [ContextAttachment]) -> String {
+        guard !attachments.isEmpty else { return "" }
+        let lines = attachments.map { item -> String in
+            switch item.kind {
+            case .screenshot:
+                return "- Screenshot \(readable(item.createdAt))\(item.caption.isEmpty ? "" : " · \(item.caption)") (id: \(item.id))"
+            case .recording:
+                return "- Recording, \(duration(item.durationSeconds)) (id: \(item.id))"
+            }
+        }
+        return "\n\n## Attachments\n\n" + lines.joined(separator: "\n") + "\n\nCall `get_attachment` with the document id and an attachment id to see it."
     }
 
     // MARK: Formatting

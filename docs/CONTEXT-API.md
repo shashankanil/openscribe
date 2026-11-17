@@ -44,19 +44,51 @@ Both servers, and the sync API, use one shape:
 | `list_recent` | `kind` (optional), `days` (default 7), `limit` (default 20) | Recent documents, newest first, without transcripts. |
 | `get_meeting` | `id`, `includeTranscript` (default false) | Meeting title, date, duration, summary, action items, notes, optionally transcript. |
 | `list_action_items` | `days` (default 14) | Action items from meeting summaries with meeting id/title/date. |
+| `get_attachment` | `documentId`, `id` | One screenshot or recording (remote server only, see Attachments). |
 
-Every tool is read-only (`annotations.readOnlyHint: true`). Server name `openscribe`. Large transcripts are truncated at ~60k characters with a note telling the model to call `get_meeting` for a narrower result.
+Every tool is read-only (`annotations.readOnlyHint: true`). Server name `openscribe` (remote server version `0.2.0`). Large transcripts are truncated at ~60k characters with a note telling the model to call `get_meeting` for a narrower result.
+
+## Attachments (remote server)
+
+Screenshots and meeting recordings uploaded by the app are stored in R2 and belong to a document.
+
+```json
+{
+  "id": "attachment id (stable, from the app; no '/')",
+  "kind": "screenshot" | "recording",
+  "contentType": "image/png",
+  "bytes": 123456,
+  "createdAt": "ISO-8601",
+  "durationSeconds": 0,
+  "caption": "string (≤ 500 chars)",
+  "url": "https://<host>/media/<token>"
+}
+```
+
+- `fetch` and `get_meeting` structured content include `attachments: [Attachment]`, and their markdown gets an `## Attachments` section with one line per attachment.
+- `url` is a signed link that expires after **one hour** and needs no auth header. `GET /media/<token>` streams the bytes with `Content-Type`, `Accept-Ranges: bytes`, `Range` → `206` (single range; `416` if unsatisfiable), `Content-Disposition: inline`, `Cache-Control: private, max-age=3600`, `X-Content-Type-Options: nosniff`. Bad or expired tokens get `403`; a token for an attachment that has since been deleted gets `404`.
+- `get_attachment {documentId, id}`: PNG or JPEG screenshots up to 5 MB come back as `[{type:"image", data:<base64>, mimeType}, {type:"text", text:<metadata>}]`. Larger images, HEIC images and all recordings come back as `[{type:"text", text:<metadata + signed URL>}, {type:"resource_link", uri:<signed URL>, name:<filename>, title, description?:<caption>, mimeType, size}]`. Structured content is `{documentId, documentTitle, attachment}`.
 
 ## Sync API (desktop app → Worker)
 
 All endpoints under `/api/v1`, JSON, `Authorization: Bearer <app token>` except login.
 
 - `GET /app/login?redirect_uri=openscribe://auth&state=<random>` – browser flow. Google sign-in, then redirects to `openscribe://auth?token=<app token>&state=<state>`. Only the `openscribe://auth` redirect is allowed. The token is opaque, stored hashed (SHA-256) server-side, revocable.
-- `GET /api/v1/me` → `{ email, name, documentCount, lastSyncAt }`
+- `GET /api/v1/me` → `{ email, name, documentCount, lastSyncAt, attachmentCount, attachmentBytes }`
 - `POST /api/v1/documents/batch` body `{ documents: [Document] }` (≤ 200 per call, ≤ 5 MB) → `{ accepted, skipped }`. Upsert by `(user, id)`; a document is replaced only when its `updatedAt` is newer. `deleted: true` tombstones it (removed from search and MCP results).
-- `DELETE /api/v1/documents/:id`
+- `DELETE /api/v1/documents/:id` – tombstones the document. Tombstoning (here or with `deleted: true` in a batch) also deletes the document's attachments.
+- `PUT /api/v1/attachments/:documentId/:attachmentId` – upload or replace one attachment. Body: the raw bytes (≤ 95 MB). Headers:
+  - `Content-Type` (required): `image/jpeg`, `image/png`, `image/heic` for screenshots; `audio/mp4`, `audio/m4a`, `audio/aac`, `audio/mpeg` for recordings. Other types → `415`.
+  - `Content-Length` (required, exact) → `411 {error:"length_required"}` if missing.
+  - `X-OpenScribe-Kind: screenshot|recording` (required). Must match the type family (`image/*` vs `audio/*`) → else `400 {error:"invalid_kind"}`.
+  - `X-OpenScribe-Sha256` (required): hex SHA-256 of the body → else `400 {error:"invalid_sha256"}`. R2 verifies it; a mismatch → `400 {error:"checksum_mismatch"}` and nothing is stored.
+  - Optional: `X-OpenScribe-Created-At` (ISO-8601, default now), `X-OpenScribe-Duration` (seconds, default 0), `X-OpenScribe-Caption` (percent-encoded UTF-8, truncated to 500 characters). Invalid values → `400 {error:"invalid_request"}`.
+
+  The document must exist for this user and not be deleted → else `404 {error:"document_not_found"}`. Body over 95 MB → `413 {error:"too_large"}`; over the 5 GB per-account quota (excluding the attachment being replaced) → `413 {error:"quota_exceeded"}`. Created → `201 {id, documentId, kind, bytes, sha256}`. If the stored attachment already has the same SHA-256 the body is not read, only the metadata headers that were sent are updated, and the response is `200` with the same shape.
+- `GET /api/v1/attachments` → `{ attachments: [{id, documentId, kind, contentType, bytes, sha256, createdAt}] }` – lets the app diff what's uploaded.
+- `DELETE /api/v1/attachments/:documentId/:attachmentId` → `204`, idempotent.
 - `POST /api/v1/logout` – revokes the app token.
-- `DELETE /api/v1/account` – deletes the user's documents, tokens and OAuth grants.
+- `DELETE /api/v1/account` – deletes the user's documents, attachments (R2 objects and rows), tokens and OAuth grants.
 
 ## Privacy
 

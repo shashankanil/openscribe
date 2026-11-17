@@ -3,7 +3,7 @@ import Foundation
 /// Transport-independent MCP (JSON-RPC 2.0) message handler for the OpenScribe context tools.
 /// Feed it one newline-delimited message at a time; it returns the response line, or nil for notifications.
 public final class MCPServer {
-    public static let supportedProtocolVersions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    public static let supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
     public static let serverName = "openscribe"
     public static let serverVersion = "0.5.0"
 

@@ -140,6 +140,45 @@ final class ShortcutEngineTests: XCTestCase {
 
     // MARK: Capture view
 
+    func testMouseButtonsActLikeKeys() {
+        install([.holdToTalk: [.mouse4], .meeting: [KeyShortcut.mouse(2, modifiers: .option)]])
+        XCTAssertTrue(center.handleMouse(down: true, button: 3, flags: 0))
+        XCTAssertTrue(center.handleMouse(down: false, button: 3, flags: 0))
+        XCTAssertFalse(center.handleMouse(down: true, button: 4, flags: 0), "Unbound buttons pass through")
+        XCTAssertFalse(center.handleMouse(down: false, button: 4, flags: 0))
+        XCTAssertFalse(center.handleMouse(down: true, button: 2, flags: 0), "A plain middle click is left alone")
+        XCTAssertTrue(center.handleMouse(down: true, button: 2, flags: option))
+        XCTAssertTrue(center.handleMouse(down: false, button: 2, flags: 0), "Release matches even after the modifier lifts")
+        XCTAssertFalse(center.handleMouse(down: true, button: 0, flags: 0))
+        drain()
+        XCTAssertEqual(events, ["press holdToTalk", "release holdToTalk", "press meeting", "release meeting"])
+    }
+
+    func testMouseButtonRulesAndNames() {
+        XCTAssertEqual(KeyShortcut.mouse4.display, "Mouse 4")
+        XCTAssertEqual(KeyShortcut.mouse(5, modifiers: .command).display, "⌘ Mouse 6")
+        XCTAssertTrue(KeyShortcut.mouse4.isUsable)
+        XCTAssertTrue(KeyShortcut.mouse4.needsEventTap)
+        XCTAssertFalse(KeyShortcut.mouse(2).isUsable)
+        XCTAssertTrue(KeyShortcut.mouse(2, modifiers: .control).isUsable)
+        XCTAssertFalse(KeyShortcut.mouse(0, modifiers: .command).isUsable)
+        XCTAssertFalse(KeyShortcut.mouse4.conflicts(with: .mouse5))
+        XCTAssertTrue(KeyShortcut.mouse4.conflicts(with: .mouse(3)))
+        let decoded = try? JSONDecoder().decode(KeyShortcut.self, from: JSONEncoder().encode(KeyShortcut.mouse5))
+        XCTAssertEqual(decoded, .mouse5)
+    }
+
+    func testCaptureViewRecordsMouseSideButtons() throws {
+        let view = HotkeyCaptureNSView()
+        var captured: KeyShortcut?
+        view.onCapture = { captured = $0 }
+        // NSEvent.mouseEvent can't set buttonNumber, so build the event from a CGEvent.
+        let cg = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown, mouseCursorPosition: .zero, mouseButton: .init(rawValue: 3)!))
+        let side = try XCTUnwrap(NSEvent(cgEvent: cg))
+        XCTAssertTrue(view.handle(side))
+        XCTAssertEqual(captured, .mouse4)
+    }
+
     func testCaptureViewRecordsLoneModifiersAndRejectsBareKeys() throws {
         let view = HotkeyCaptureNSView()
         var captured: [KeyShortcut] = []

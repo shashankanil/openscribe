@@ -161,11 +161,13 @@ enum ShortcutFormatter {
         if let lone = KeyShortcut.modifierKeys[keyCode] {
             return lone.name
         }
+        let mouse = keyCode >= KeyShortcut.mouseBase ? KeyShortcut.mouseButtonName(Int(keyCode - KeyShortcut.mouseBase)) : nil
         var symbols = ""
         if modifiers.contains(.control) { symbols += "⌃" }
         if modifiers.contains(.option) { symbols += "⌥" }
         if modifiers.contains(.shift) { symbols += "⇧" }
         if modifiers.contains(.command) { symbols += "⌘" }
+        if let mouse { return symbols.isEmpty ? mouse : "\(symbols) \(mouse)" }
         let named = keyName(for: keyCode)
         let printable = characters.flatMap { value -> String? in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
@@ -369,6 +371,9 @@ struct AppSettings: Codable, Equatable {
     var cloudSyncEnabled = false
     /// A self-hosted OpenScribe Cloud. Empty uses the hosted service.
     var cloudServerURL = ""
+    /// Also upload screenshots and meeting recordings (stored in Cloudflare R2) when syncing.
+    var cloudSyncScreenshots = true
+    var cloudSyncRecordings = true
 
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
@@ -381,7 +386,7 @@ struct AppSettings: Codable, Equatable {
         case showOverlayWhenIdle, shortcutDisplay, shortcutKeyCode, shortcutModifiers, overlayPosition
         case dictationMode, theme, interactionSounds, snippets, appWritingTones, microphoneDeviceUID
         case shortcuts, shortcutBindings, flowbarPlacement, meetingMicrophone, meetingSystemAudio, meetingSummarize
-        case cloudSyncEnabled, cloudServerURL
+        case cloudSyncEnabled, cloudServerURL, cloudSyncScreenshots, cloudSyncRecordings
     }
 
     init() {}
@@ -446,6 +451,8 @@ struct AppSettings: Codable, Equatable {
         meetingSummarize = try container.decodeIfPresent(Bool.self, forKey: .meetingSummarize) ?? true
         cloudSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncEnabled) ?? false
         cloudServerURL = try container.decodeIfPresent(String.self, forKey: .cloudServerURL) ?? ""
+        cloudSyncScreenshots = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncScreenshots) ?? true
+        cloudSyncRecordings = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncRecordings) ?? true
     }
 }
 

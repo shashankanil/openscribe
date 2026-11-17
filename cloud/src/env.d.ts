@@ -6,6 +6,10 @@ declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
     OAUTH_KV: KVNamespace;
+    /** Screenshots and recordings (see src/attachments.ts). */
+    MEDIA: R2Bucket;
+    /** Per-user R2 quota in bytes, as a decimal string. */
+    MEDIA_QUOTA_BYTES: string;
     /** Public origin, no trailing slash, e.g. https://openscribe-cloud.example.workers.dev */
     PUBLIC_URL: string;
     APP_DOWNLOAD_URL: string;

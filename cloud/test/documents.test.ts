@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { upsertDocuments, deleteDocument } from "../src/documents";
 import { fetchDocument, search } from "../src/tools";
-import { makeDoc, resetDb, seedUser } from "./helpers";
+import { makeDoc, media, resetDb, seedUser } from "./helpers";
 
 beforeEach(() => resetDb(env.DB));
 
@@ -12,7 +12,7 @@ describe("migrations", () => {
       "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger') ORDER BY name",
     ).all<{ name: string }>();
     const names = results.map((r) => r.name);
-    for (const name of ["users", "app_tokens", "documents", "documents_fts", "documents_ai", "documents_au", "documents_ad"]) {
+    for (const name of ["users", "app_tokens", "documents", "documents_fts", "documents_ai", "documents_au", "documents_ad", "attachments"]) {
       expect(names).toContain(name);
     }
   });
@@ -31,12 +31,12 @@ describe("batch upsert", () => {
     // Older updatedAt: skipped, content unchanged.
     const older = { ...doc, title: "Stale", updatedAt: "2025-12-31T00:00:00.000Z" };
     expect(await upsertDocuments(env.DB, "u1", [older])).toMatchObject({ accepted: 0, skipped: 1 });
-    expect((await fetchDocument(env.DB, "u1", { id: "doc-1" })).structured.title).toBe("Quarterly planning");
+    expect((await fetchDocument(env.DB, "u1", { id: "doc-1" }, media("u1"))).structured.title).toBe("Quarterly planning");
 
     // Newer updatedAt: replaced, and the FTS index follows.
     const newer = { ...doc, title: "Annual planning", body: "Budget for mango launch", updatedAt: "2026-01-02T00:00:00.000Z" };
     expect(await upsertDocuments(env.DB, "u1", [newer])).toMatchObject({ accepted: 1, skipped: 0 });
-    expect((await fetchDocument(env.DB, "u1", { id: "doc-1" })).structured.title).toBe("Annual planning");
+    expect((await fetchDocument(env.DB, "u1", { id: "doc-1" }, media("u1"))).structured.title).toBe("Annual planning");
     expect((await search(env.DB, "u1", { query: "kiwi" })).structured.results).toHaveLength(0);
     expect((await search(env.DB, "u1", { query: "mango" })).structured.results).toHaveLength(1);
 
@@ -44,7 +44,7 @@ describe("batch upsert", () => {
     const tomb = { ...newer, deleted: true, updatedAt: "2026-01-03T00:00:00.000Z" };
     expect(await upsertDocuments(env.DB, "u1", [tomb])).toMatchObject({ accepted: 1 });
     expect((await search(env.DB, "u1", { query: "mango" })).structured.results).toHaveLength(0);
-    await expect(fetchDocument(env.DB, "u1", { id: "doc-1" })).rejects.toThrow(/No document/);
+    await expect(fetchDocument(env.DB, "u1", { id: "doc-1" }, media("u1"))).rejects.toThrow(/No document/);
     const row = await env.DB.prepare("SELECT deleted, body, title FROM documents WHERE id = 'doc-1'").first();
     expect(row).toEqual({ deleted: 1, body: "", title: "" });
 

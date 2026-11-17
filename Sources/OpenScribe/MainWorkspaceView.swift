@@ -11,7 +11,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .general: return "General"
         case .shortcuts: return "Shortcuts"
         case .connections: return "API & Models"
-        case .ai: return "AI & MCP"
+        case .ai: return "Connect AI apps"
         case .personalize: return "Personalization"
         case .privacy: return "Privacy"
         case .permissions: return "Permissions"
@@ -35,11 +35,44 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     static let library: [WorkspaceSection] = [.notes, .meetings, .calendar]
     static let settings: [WorkspaceSection] = [.general, .shortcuts, .connections, .ai, .personalize, .privacy, .permissions]
     var isSettings: Bool { Self.settings.contains(self) }
+    var group: SidebarGroup { SidebarGroup.all.first { $0.sections.contains(self) }! }
+}
+
+/// A sidebar entry. Groups with more than one section expand to show them as sub-items.
+struct SidebarGroup: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let symbol: String
+    /// Every section reached from this entry; the first one opens when the entry is clicked.
+    let sections: [WorkspaceSection]
+    let isSettings: Bool
+
+    var children: [WorkspaceSection] { sections.count > 1 ? sections : [] }
+
+    static let notes = SidebarGroup(id: "notes", title: "Notes", symbol: "text.alignleft", sections: [.notes], isSettings: false)
+    static let meetings = SidebarGroup(id: "meetings", title: "Meetings", symbol: "person.2.wave.2", sections: [.meetings, .calendar], isSettings: false)
+    static let preferences = SidebarGroup(id: "preferences", title: "Preferences", symbol: "slider.horizontal.3",
+                                          sections: [.general, .shortcuts, .personalize], isSettings: true)
+    static let ai = SidebarGroup(id: "ai", title: "AI", symbol: "sparkles", sections: [.connections, .ai], isSettings: true)
+    static let privacy = SidebarGroup(id: "privacy", title: "Privacy & Access", symbol: "lock.shield",
+                                      sections: [.privacy, .permissions], isSettings: true)
+
+    static let all: [SidebarGroup] = [.notes, .meetings, .preferences, .ai, .privacy]
+
+    /// Sub-items use the page title, except the group's own page.
+    static func childTitle(_ section: WorkspaceSection) -> String {
+        switch section {
+        case .meetings: return "All meetings"
+        default: return section.title
+        }
+    }
 }
 
 struct MainWorkspaceView: View {
     @ObservedObject var controller: AppController
     @State private var confirmingDiscard = false
+    /// The open page's group is expanded unless the user folded it.
+    @State private var foldedGroup: String?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -106,13 +139,14 @@ struct MainWorkspaceView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 2) {
-                    destination(.notes, count: controller.notes.count)
-                    destination(.meetings, count: controller.meetings.meetings.count)
-                    destination(.calendar, count: 0)
+                    ForEach(SidebarGroup.all.filter { !$0.isSettings }) { groupRows($0) }
                     Text("SETTINGS").font(.system(size: 9.5, weight: .semibold)).tracking(1)
                         .foregroundStyle(FlowTheme.inkFaint).padding(.horizontal, 9).padding(.top, 24).padding(.bottom, 7)
-                    ForEach(WorkspaceSection.settings) { destination($0, count: 0) }
+                    ForEach(SidebarGroup.all.filter(\.isSettings)) { groupRows($0) }
                 }
+                .animation(.easeOut(duration: 0.16), value: section)
+                .animation(.easeOut(duration: 0.16), value: foldedGroup)
+                .onChange(of: section) { _, _ in foldedGroup = nil }
             }
 
             Spacer(minLength: 16)
@@ -129,9 +163,35 @@ struct MainWorkspaceView: View {
         .background(VisualEffectBackground(material: .sidebar, blendingMode: .behindWindow))
     }
 
-    private func destination(_ target: WorkspaceSection, count: Int) -> some View {
-        SidebarRow(title: target.title, symbol: target.symbol, selected: section == target, count: count) {
-            controller.workspaceSection = target
+    @ViewBuilder private func groupRows(_ group: SidebarGroup) -> some View {
+        let containsSelection = group.sections.contains(section)
+        let expanded = !group.children.isEmpty && containsSelection && foldedGroup != group.id
+        SidebarRow(title: group.title, symbol: group.symbol,
+                   selected: containsSelection && (group.children.isEmpty || !expanded),
+                   emphasized: containsSelection, count: count(for: group),
+                   disclosure: group.children.isEmpty ? nil : expanded) {
+            if containsSelection && !group.children.isEmpty {
+                // Clicking the open group again folds or unfolds it; the page stays.
+                foldedGroup = expanded ? group.id : nil
+            } else {
+                controller.workspaceSection = group.sections[0]
+            }
+        }
+        if expanded {
+            ForEach(group.children) { child in
+                SidebarChildRow(title: SidebarGroup.childTitle(child), selected: section == child) {
+                    controller.workspaceSection = child
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private func count(for group: SidebarGroup) -> Int {
+        switch group.id {
+        case SidebarGroup.notes.id: return controller.notes.count
+        case SidebarGroup.meetings.id: return controller.meetings.meetings.count
+        default: return 0
         }
     }
 
@@ -230,7 +290,11 @@ private struct SidebarRow: View {
     let title: String
     let symbol: String
     let selected: Bool
+    /// The open page is inside this entry (tints the icon even when a sub-item is highlighted).
+    var emphasized = false
     let count: Int
+    /// nil: no sub-items; otherwise whether they are showing.
+    var disclosure: Bool? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -239,12 +303,19 @@ private struct SidebarRow: View {
             HStack(spacing: 9) {
                 Image(systemName: symbol)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(selected ? FlowTheme.accent : FlowTheme.inkMuted)
+                    .foregroundStyle(selected || emphasized ? FlowTheme.accent : FlowTheme.inkMuted)
                     .frame(width: 18)
-                Text(title).font(.system(size: 13, weight: selected ? .semibold : .medium))
+                Text(title).font(.system(size: 13, weight: selected || emphasized ? .semibold : .medium))
                 Spacer(minLength: 0)
                 if count > 0 {
                     Text("\(count)").font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(FlowTheme.inkFaint)
+                }
+                if let disclosure {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(FlowTheme.inkFaint)
+                        .rotationEffect(.degrees(disclosure ? 90 : 0))
+                        .opacity(disclosure || hovering || emphasized ? 1 : 0.6)
                 }
             }
             .foregroundStyle(FlowTheme.ink)
@@ -252,6 +323,39 @@ private struct SidebarRow: View {
             .padding(.vertical, 7)
             .background(selected ? FlowTheme.surfaceHover : hovering ? FlowTheme.surfaceMuted : .clear,
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// A sub-item under an expanded sidebar entry.
+private struct SidebarChildRow: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 0) {
+                Text(title).font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? FlowTheme.ink : FlowTheme.inkMuted)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 36)
+            .padding(.trailing, 9)
+            .padding(.vertical, 5.5)
+            .background(selected ? FlowTheme.surfaceHover : hovering ? FlowTheme.surfaceMuted : .clear,
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(alignment: .leading) {
+                // A thin guide ties the sub-items to their entry.
+                Rectangle().fill(selected ? FlowTheme.accent : FlowTheme.line).frame(width: selected ? 2 : 1)
+                    .padding(.vertical, selected ? 5 : 0).padding(.leading, 18)
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

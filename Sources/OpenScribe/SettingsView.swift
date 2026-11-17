@@ -269,8 +269,8 @@ struct SettingsView: View {
         let shortcuts = controller.settings.shortcuts(for: action)
         let recording = recordingAction == action
         let detail = recording ? (captureMessage ?? (action.usesRelease
-            ? "Press a key combination, or tap a single modifier such as Right ⌘. Escape cancels."
-            : "Press the new key combination. Escape cancels.")) : action.detail
+            ? "Press a key combination, tap a single modifier such as Right ⌘, or press a mouse side button. Escape cancels."
+            : "Press the new key combination or a mouse side button. Escape cancels.")) : action.detail
         return FlowSettingsRow(title: action.title, detail: detail, symbol: action.symbol) {
             HStack(spacing: 6) {
                 ForEach(shortcuts, id: \.self) { shortcut in
@@ -293,7 +293,7 @@ struct SettingsView: View {
                 }
                 Menu {
                     if action.usesRelease {
-                        Section("Add a single key") {
+                        Section("Add a single key or button") {
                             ForEach(ShortcutDefaults.holdPresets, id: \.self) { preset in
                                 Button(preset.display) { add(preset, to: action, replacing: nil) }
                                     .disabled(shortcuts.contains(preset))
@@ -484,7 +484,7 @@ final class HotkeyCaptureNSView: NSView {
     private func startRecording() {
         guard monitor == nil else { return }
         window?.makeFirstResponder(self)
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .otherMouseDown]) { [weak self] event in
             guard let self, self.isRecording else { return event }
             return self.handle(event) ? nil : event
         }
@@ -507,6 +507,16 @@ final class HotkeyCaptureNSView: NSView {
             return true
         }
         loneModifier = nil
+        if event.type == .otherMouseDown {
+            let modifiers = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
+            let shortcut = KeyShortcut.mouse(event.buttonNumber, modifiers: modifiers)
+            guard shortcut.isUsable else {
+                onInvalid?("Hold ⌘, ⌥ or ⌃ while middle-clicking, or use a side button such as Mouse 4.")
+                return true
+            }
+            capture(shortcut)
+            return true
+        }
         if event.keyCode == 53 { stopRecording(); onCancel?(); return true }
         let modifiers = event.modifierFlags.intersection(ShortcutFormatter.supportedModifiers)
         let display = ShortcutFormatter.display(keyCode: event.keyCode, modifiers: modifiers, characters: event.charactersIgnoringModifiers)
