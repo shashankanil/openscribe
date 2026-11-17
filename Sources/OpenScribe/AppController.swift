@@ -106,6 +106,7 @@ final class AppController: ObservableObject {
             self.finishCapture()
             self.showTransientError("Recording stopped because the microphone was interrupted. Captured audio is kept for transcription or recovery.\n\n\(error.localizedDescription)")
         }
+        meetings.currentSettings = { [weak self] in self?.store.settings }
         meetingSubscription = meetings.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
             Task { @MainActor in self?.meetingStateChanged() }

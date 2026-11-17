@@ -137,12 +137,55 @@ final class MeetingTests: XCTestCase {
         XCTAssertNil(store.audioURL(meetingID: UUID(), relativePath: "meeting.json"))
     }
 
-    func testSummaryRejectsUncitedAndUnknownSources() throws {
-        let valid = MeetingSummary(overview: [.init(text: "Ship Friday", sources: ["a"])], decisions: [], actions: [])
-        XCTAssertNoThrow(try valid.validated(segmentIDs: ["a"]))
-        XCTAssertThrowsError(try valid.validated(segmentIDs: ["b"]))
-        let uncited = MeetingSummary(overview: [], decisions: [], actions: [.init(text: "Invented", sources: [])])
-        XCTAssertThrowsError(try uncited.validated(segmentIDs: ["a"]))
+    private func segments() -> [MeetingSegment] {
+        [MeetingSegment(id: "S1/microphone/chunk-00000.wav", track: "microphone", start: 0, duration: 15, text: "We ship Friday."),
+         MeetingSegment(id: "S1/system/chunk-00001.wav", track: "system", start: 75, duration: 15, text: "Priya owns the beta.")]
+    }
+
+    func testSummaryParsingToleratesCommonModelReplies() throws {
+        // Prose around the JSON, a bare-string point, and citations by file name and timestamp.
+        let reply = """
+        Here is the summary:
+        ```json
+        {"overview":[{"text":"Release timing","sources":["S1/microphone/chunk-00000.wav"]}],
+         "decisions":["Ship on Friday"],
+         "actions":[{"text":"Priya runs the beta","owner":"Priya","sources":["chunk-00001.wav"]},
+                    {"text":"Book a venue","sources":["[01:15]"]}]}
+        ```
+        """
+        let summary = try MeetingSummary.parse(reply, segments: segments())
+        XCTAssertEqual(summary.overview.map(\.sources), [["S1/microphone/chunk-00000.wav"]])
+        XCTAssertEqual(summary.actions.map(\.sources), [["S1/system/chunk-00001.wav"], ["S1/system/chunk-00001.wav"]])
+        XCTAssertEqual(summary.decisions, [], "When the model cites, an uncited point is dropped rather than failing everything")
+    }
+
+    func testSummaryWithoutAnyCitationsKeepsItsPoints() throws {
+        let summary = try MeetingSummary.parse(#"{"overview":["We ship Friday"],"decisions":[],"actions":[{"text":"Priya owns the beta"}]}"#,
+                                               segments: segments())
+        XCTAssertEqual(summary.overview, [.init(text: "We ship Friday", sources: [])])
+        XCTAssertEqual(summary.actions.map(\.text), ["Priya owns the beta"])
+        XCTAssertThrowsError(try MeetingSummary.parse("Sorry, I can't help with that.", segments: segments()))
+        let unknown = try MeetingSummary.parse(#"{"overview":[{"text":"Made up","sources":["nope"]},{"text":"Real","sources":["S1/microphone/chunk-00000.wav"]}]}"#,
+                                               segments: segments())
+        XCTAssertEqual(unknown.overview.map(\.text), ["Real"])
+    }
+
+    @MainActor
+    func testSummariesUseTheCurrentLanguageModel() {
+        let controller = MeetingController(store: MeetingStore(root: root()), credentialRootURL: root())
+        var recorded = AppSettings()
+        recorded.languageModelProvider = .openAI
+        recorded.languageModel = "old-model"
+        let record = MeetingRecord(title: "Planning", settings: recorded)
+        var now = AppSettings()
+        now.languageModelProvider = .anthropic
+        now.languageModelBaseURL = LanguageModelProvider.anthropic.defaultBaseURL
+        now.languageModel = "claude-new"
+        controller.currentSettings = { now }
+        let used = controller.summarySettings(for: record)
+        XCTAssertEqual(used.languageModelProvider, .anthropic)
+        XCTAssertEqual(used.languageModel, "claude-new")
+        XCTAssertEqual(used.languageModelBaseURL, LanguageModelProvider.anthropic.defaultBaseURL)
     }
 
     func testProcessingResumesOnlyMissingChunksAndExportsEvidence() async throws {
