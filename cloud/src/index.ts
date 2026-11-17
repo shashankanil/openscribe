@@ -27,7 +27,7 @@ const mcpApiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const props = (ctx as ExecutionContext & { props?: McpProps }).props;
     if (!props?.userId) return new Response("Unauthorized", { status: 401 });
-    const handler = createMcpHandler(() => createOpenScribeServer(env.DB, props.userId), {
+    const handler = createMcpHandler(() => createOpenScribeServer(env, props.userId), {
       route: "/mcp",
       allowedOriginHostnames: [new URL(env.PUBLIC_URL).hostname, "localhost", "127.0.0.1", ...BROWSER_CLIENT_HOSTS],
     });

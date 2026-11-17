@@ -1,9 +1,13 @@
 /**
  * MCP tool logic as pure functions over (db, userId, args). The MCP server in mcp.ts only
  * adapts these to the protocol, so they can be tested against a seeded D1 without OAuth.
- * Every query is scoped by user_id and excludes tombstones.
+ * Every query is scoped by user_id and excludes tombstones. Tools that expose attachments also
+ * take a per-user `MediaAccess` (R2 bucket + signed URL builder).
  */
+import { attachmentFilename, getAttachmentRow, listAttachmentRows, type AttachmentKind, type AttachmentRow } from "./attachments";
+import { base64 } from "./crypto";
 import { DOCUMENT_COLUMNS, rowToDocument, type DocumentRow, type OpenScribeDocument } from "./documents";
+import type { MediaAccess } from "./media";
 
 export const TRANSCRIPT_CHAR_LIMIT = 60_000;
 const DAY_MS = 86_400_000;
@@ -12,11 +16,19 @@ export type Kind = "note" | "meeting";
 
 export class ToolError extends Error {}
 
+/** The MCP content blocks these tools produce (a subset of the SDK's ContentBlock). */
+export type ContentItem =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "resource_link"; uri: string; name: string; title?: string; description?: string; mimeType: string; size: number };
+
 export interface ToolResult<T> {
   /** Text content for the model. */
   text: string;
   /** Structured content (MCP `structuredContent`). */
   structured: T;
+  /** Full content, when it is more than `text` alone. */
+  content?: ContentItem[];
 }
 
 const clamp = (value: number | undefined, fallback: number, min: number, max: number) =>
@@ -99,6 +111,12 @@ export function truncateTranscript(transcript: string | null): string | null {
   );
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function formatDuration(seconds: number): string {
   const total = Math.round(seconds);
   const h = Math.floor(total / 3600);
@@ -109,8 +127,62 @@ function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+// ---------------------------------------------------------------------------------------------
+// attachments
+
+export interface AttachmentInfo {
+  id: string;
+  kind: AttachmentKind;
+  contentType: string;
+  bytes: number;
+  createdAt: string;
+  durationSeconds: number;
+  caption: string;
+  /** Signed media URL, valid for one hour. */
+  url: string;
+}
+
+async function toAttachmentInfo(row: AttachmentRow, media: MediaAccess): Promise<AttachmentInfo> {
+  return {
+    id: row.id,
+    kind: row.kind,
+    contentType: row.content_type,
+    bytes: row.bytes,
+    createdAt: new Date(row.created_at).toISOString(),
+    durationSeconds: row.duration_seconds,
+    caption: row.caption,
+    url: await media.url(row.document_id, row.id),
+  };
+}
+
+async function documentAttachments(db: D1Database, userId: string, documentId: string, media: MediaAccess): Promise<AttachmentInfo[]> {
+  return Promise.all((await listAttachmentRows(db, userId, documentId)).map((row) => toAttachmentInfo(row, media)));
+}
+
+function describeAttachment(a: AttachmentInfo): string {
+  const parts = [a.contentType, formatBytes(a.bytes)];
+  if (a.kind === "recording" && a.durationSeconds > 0) parts.push(formatDuration(a.durationSeconds));
+  parts.push(a.createdAt);
+  return `${a.kind} \`${a.id}\` (${parts.join(", ")})${a.caption ? ` "${a.caption}"` : ""}`;
+}
+
+function attachmentsMarkdown(documentId: string, attachments: AttachmentInfo[]): string[] {
+  if (attachments.length === 0) return [];
+  return [
+    "## Attachments",
+    "",
+    ...attachments.map((a) => `- ${describeAttachment(a)}: ${a.url}`),
+    "",
+    `Call get_attachment with documentId "${documentId}" and an attachment id to view it. URLs expire in one hour.`,
+    "",
+  ];
+}
+
 /** Render a document as markdown for the model. */
-export function documentToMarkdown(doc: OpenScribeDocument, opts: { includeTranscript?: boolean } = {}): string {
+export function documentToMarkdown(
+  doc: OpenScribeDocument,
+  opts: { includeTranscript?: boolean; attachments?: AttachmentInfo[] } = {},
+): string {
   const lines: string[] = [`# ${doc.title || "Untitled"}`, ""];
   const meta = [`Kind: ${doc.kind}`, `Created: ${doc.createdAt}`, `Updated: ${doc.updatedAt}`, `ID: ${doc.id}`];
   if (doc.kind === "meeting" && doc.durationSeconds > 0) meta.push(`Duration: ${formatDuration(doc.durationSeconds)}`);
@@ -119,6 +191,7 @@ export function documentToMarkdown(doc: OpenScribeDocument, opts: { includeTrans
   if (doc.summary) lines.push("## Summary", "", doc.summary, "");
   if (doc.actionItems.length) lines.push("## Action items", "", ...doc.actionItems.map((a) => `- [ ] ${a}`), "");
   if (doc.body) lines.push(doc.kind === "meeting" ? "## Notes" : "## Note", "", doc.body, "");
+  lines.push(...attachmentsMarkdown(doc.id, opts.attachments ?? []));
   if (opts.includeTranscript !== false && doc.transcript) lines.push("## Transcript", "", truncateTranscript(doc.transcript)!, "");
   return lines.join("\n").trimEnd() + "\n";
 }
@@ -126,11 +199,19 @@ export function documentToMarkdown(doc: OpenScribeDocument, opts: { includeTrans
 // ---------------------------------------------------------------------------------------------
 // fetch
 
-export async function fetchDocument(db: D1Database, userId: string, args: { id: string }): Promise<ToolResult<OpenScribeDocument>> {
+export type FetchedDocument = OpenScribeDocument & { attachments: AttachmentInfo[] };
+
+export async function fetchDocument(
+  db: D1Database,
+  userId: string,
+  args: { id: string },
+  media: MediaAccess,
+): Promise<ToolResult<FetchedDocument>> {
   const doc = await getDocument(db, userId, args.id);
   if (!doc) throw new ToolError(`No document with id "${args.id}".`);
-  const structured = { ...doc, transcript: truncateTranscript(doc.transcript) };
-  return { text: documentToMarkdown(doc), structured };
+  const attachments = await documentAttachments(db, userId, doc.id, media);
+  const structured = { ...doc, transcript: truncateTranscript(doc.transcript), attachments };
+  return { text: documentToMarkdown(doc, { attachments }), structured };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -187,6 +268,7 @@ export interface MeetingResult {
   actionItems: string[];
   notes: string;
   tags: string[];
+  attachments: AttachmentInfo[];
   transcript?: string | null;
 }
 
@@ -194,10 +276,12 @@ export async function getMeeting(
   db: D1Database,
   userId: string,
   args: { id: string; includeTranscript?: boolean },
+  media: MediaAccess,
 ): Promise<ToolResult<MeetingResult>> {
   const doc = await getDocument(db, userId, args.id);
   if (!doc || doc.kind !== "meeting") throw new ToolError(`No meeting with id "${args.id}".`);
   const include = args.includeTranscript === true;
+  const attachments = await documentAttachments(db, userId, doc.id, media);
   const structured: MeetingResult = {
     id: doc.id,
     title: doc.title,
@@ -208,9 +292,10 @@ export async function getMeeting(
     actionItems: doc.actionItems,
     notes: doc.body,
     tags: doc.tags,
+    attachments,
     ...(include ? { transcript: truncateTranscript(doc.transcript) } : {}),
   };
-  return { text: documentToMarkdown(doc, { includeTranscript: include }), structured };
+  return { text: documentToMarkdown(doc, { includeTranscript: include, attachments }), structured };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -249,4 +334,58 @@ export async function listActionItems(
     ? actionItems.map((a) => `- [ ] ${a.text} — ${a.meetingTitle || "Untitled meeting"} (${a.meetingDate.slice(0, 10)}, id ${a.meetingId})`).join("\n")
     : `No action items from meetings in the last ${days} days.`;
   return { text, structured: { actionItems } };
+}
+
+// ---------------------------------------------------------------------------------------------
+// get_attachment
+
+/** Screenshots up to this size are returned inline as MCP image content. */
+export const INLINE_IMAGE_LIMIT = 5 * 1024 * 1024;
+/** Image types MCP clients (and model APIs) reliably accept inline. HEIC goes out as a link. */
+const INLINE_IMAGE_TYPES = new Set(["image/png", "image/jpeg"]);
+
+export async function getAttachment(
+  db: D1Database,
+  userId: string,
+  args: { documentId: string; id: string },
+  media: MediaAccess,
+): Promise<ToolResult<{ documentId: string; documentTitle: string; attachment: AttachmentInfo }>> {
+  const doc = await getDocument(db, userId, args.documentId);
+  const row = doc ? await getAttachmentRow(db, userId, args.documentId, args.id) : null;
+  if (!doc || !row) throw new ToolError(`No attachment "${args.id}" on document "${args.documentId}".`);
+  const attachment = await toAttachmentInfo(row, media);
+  const structured = { documentId: doc.id, documentTitle: doc.title, attachment };
+  const label = `${describeAttachment(attachment)} from ${doc.kind} "${doc.title || "Untitled"}" (${doc.id})`;
+
+  if (row.kind === "screenshot" && INLINE_IMAGE_TYPES.has(row.content_type) && row.bytes <= INLINE_IMAGE_LIMIT) {
+    const object = await media.bucket.get(row.r2_key);
+    if (!object) throw new ToolError(`Attachment "${args.id}" is missing from storage.`);
+    const data = base64(new Uint8Array(await object.arrayBuffer()));
+    const text = `${label}\nSigned URL (expires in one hour): ${attachment.url}`;
+    return { text, structured, content: [{ type: "image", data, mimeType: row.content_type }, { type: "text", text }] };
+  }
+
+  const hint =
+    row.kind === "recording"
+      ? doc.kind === "meeting"
+        ? `The transcript is available from get_meeting with includeTranscript: true.`
+        : ""
+      : `This image is too large or in a format that isn't returned inline.`;
+  const text = [label, `Signed URL (expires in one hour): ${attachment.url}`, hint].filter(Boolean).join("\n");
+  return {
+    text,
+    structured,
+    content: [
+      { type: "text", text },
+      {
+        type: "resource_link",
+        uri: attachment.url,
+        name: attachmentFilename(doc.title, row),
+        title: `${doc.title || "Untitled"} ${row.kind}`,
+        ...(row.caption ? { description: row.caption } : {}),
+        mimeType: row.content_type,
+        size: row.bytes,
+      },
+    ],
+  };
 }

@@ -5,12 +5,12 @@ A Cloudflare Worker that does two jobs:
 1. **Sync API** for the OpenScribe desktop app (`/app/login`, `/api/v1/*`). Sync is opt-in.
 2. **Remote MCP server** at `/mcp` (Streamable HTTP). Claude, ChatGPT and other MCP clients connect with OAuth 2.1 and dynamic client registration. Google is the identity provider.
 
-The binding contract is [`docs/CONTEXT-API.md`](../docs/CONTEXT-API.md): document shape, the five tools, and the sync endpoints.
+The binding contract is [`docs/CONTEXT-API.md`](../docs/CONTEXT-API.md): document shape, the tools, the sync endpoints, and attachments.
 
 | Piece | Implementation |
 |---|---|
 | Runtime | Cloudflare Workers (TypeScript), `wrangler.jsonc` |
-| Storage | D1 (`documents`, `users`, `app_tokens`), with an FTS5 index (`documents_fts`, bm25 ranking, `snippet()`) |
+| Storage | D1 (`documents`, `users`, `app_tokens`, `attachments`), with an FTS5 index (`documents_fts`, bm25 ranking, `snippet()`). Screenshots and recordings in R2 (`MEDIA` → bucket `openscribe-media`, keys `u/{userId}/{documentId}/{attachmentId}`), 5 GB per user (`MEDIA_QUOTA_BYTES`). |
 | OAuth server | `@cloudflare/workers-oauth-provider` 1.2 (DCR, PKCE, CIMD, refresh rotation). Grants and tokens live in KV (`OAUTH_KV`) and are stored hashed. |
 | MCP | `createMcpHandler` from `agents/mcp/server` with `@modelcontextprotocol/server` (SDK v2). Stateless: no Durable Objects. |
 | Identity | Google OpenID Connect (authorization code + PKCE). Users are keyed by Google `sub`. |
@@ -26,6 +26,8 @@ The binding contract is [`docs/CONTEXT-API.md`](../docs/CONTEXT-API.md): documen
 | `GET /callback` | **The Google redirect URI**, shared by MCP sign-in and app sign-in |
 | `GET /app/login?redirect_uri=openscribe://auth&state=…` | Desktop sign-in. Ends at `openscribe://auth?token=…&state=…`. |
 | `/api/v1/me`, `/api/v1/documents/batch`, `/api/v1/documents/:id`, `/api/v1/logout`, `/api/v1/account` | Sync API. Needs an app token. |
+| `PUT+DELETE /api/v1/attachments/:documentId/:attachmentId`, `GET /api/v1/attachments` | Attachment upload, delete and listing. Needs an app token. |
+| `GET /media/:token` | Signed, 1-hour attachment URL handed out by the MCP tools. No auth header; supports `Range`. |
 
 ## Deploy
 
@@ -39,14 +41,15 @@ npm install
 npx wrangler login
 ```
 
-### 2. Create the D1 database and the KV namespace
+### 2. Create the D1 database, the KV namespace and the R2 bucket
 
 ```sh
 npx wrangler d1 create openscribe
 npx wrangler kv namespace create OAUTH_KV
+npx wrangler r2 bucket create openscribe-media
 ```
 
-Paste the printed `database_id` into `d1_databases[0].database_id` in `wrangler.jsonc`. Paste the KV `id` into `kv_namespaces[0].id`.
+Paste the printed `database_id` into `d1_databases[0].database_id` in `wrangler.jsonc`. Paste the KV `id` into `kv_namespaces[0].id`. The R2 binding refers to the bucket by name, so nothing needs pasting; if you pick another bucket name, change `r2_buckets[0].bucket_name`. The bucket stays private: media is only served through the Worker's signed `/media/` URLs.
 
 ### 3. Pick the public URL
 
@@ -85,7 +88,7 @@ npx wrangler secret put HOSTED_DOMAIN
 
 If the Worker doesn't exist yet, `wrangler secret put` offers to create it. Answer yes.
 
-`COOKIE_ENCRYPTION_KEY` signs the "remember this client" consent cookie. It must be at least 32 characters.
+`COOKIE_ENCRYPTION_KEY` signs the "remember this client" consent cookie, and (through a derived key) the signed media URLs. It must be at least 32 characters. Rotating it invalidates outstanding media URLs, which only live an hour anyway.
 
 ### 6. Apply migrations and deploy
 
@@ -93,6 +96,8 @@ If the Worker doesn't exist yet, `wrangler secret put` offers to create it. Answ
 npx wrangler d1 migrations apply openscribe --remote
 npx wrangler deploy
 ```
+
+Upgrading an existing deployment to attachments: create the bucket (step 2), then run the same two commands. `migrations apply` only runs the new `0002_attachments.sql`.
 
 ### 7. Smoke test
 
@@ -157,6 +162,9 @@ The tests apply the migrations to a local D1 and cover the following:
 - `/app/login` redirect validation and the cookie-bound state round-trip, with Google mocked
 - body limits
 - account deletion
+- attachments: upload validation (type, kind, sha256, size, quota, unknown or deleted document), sha256 dedupe, R2 checksum mismatch, listing, deletion, purge on tombstone and on account deletion
+- signed media URLs: full and `Range` responses, 416, tampered, foreign-key and expired tokens
+- `fetch`/`get_meeting` attachment listings and `get_attachment` image vs. `resource_link` output, also through `/mcp`
 - a full end-to-end flow: dynamic registration → consent → Google (mocked) → `/token` → `/mcp` `tools/list` and `tools/call`
 
 ## Security notes
@@ -164,5 +172,6 @@ The tests apply the migrations to a local D1 and cover the following:
 - **Scoping:** every SQL query filters by the user id taken from the verified token. The MCP tools only see `deleted = 0` rows. A tombstone wipes the stored content and keeps only the id, kind and timestamps.
 - **App login:** only the exact string `openscribe://auth` is accepted as `redirect_uri`. Anything else gets a `400` page and no redirect. The app's `state` stays server-side in KV under a random nonce that expires in 10 minutes. That nonce is the Google `state`, and it is bound to the browser by a `__Host-` HttpOnly cookie. The callback needs both the cookie and the KV record, and each record works once. This blocks login CSRF and token injection.
 - **MCP OAuth:** consent is per client, the consent page can't be framed, and the forms are bound to the browser. The upstream `state` is created only after consent and is bound to the browser too (library helpers). PKCE is used both with MCP clients and with Google.
-- **Account deletion:** `DELETE /api/v1/account` revokes every OAuth grant (`listUserGrants` + `revokeGrant`), then deletes the user's documents, app tokens and user row.
+- **Account deletion:** `DELETE /api/v1/account` revokes every OAuth grant (`listUserGrants` + `revokeGrant`), deletes every R2 object under `u/{userId}/`, then deletes the user's attachments, documents, app tokens and user row.
+- **Media:** R2 objects are only reachable through the Worker. Uploads are verified by R2 against the client's SHA-256. MCP tools hand out `/media/<token>` URLs: an HMAC-SHA256 over `{user, document, attachment, exp}` with a key derived from `COOKIE_ENCRYPTION_KEY` (label `openscribe-media-v1`), valid for one hour, compared in constant time, and re-checked against the `attachments` table on every request, so deleting an attachment or document kills its links.
 - **Not included yet:** rate limiting. Add a Cloudflare rate-limiting rule on `/api/v1/*` and `/register` before a wide launch. KV TTLs expire OAuth records on their own; for extra cleanup you can call `purgeExpiredData()` from a Cron Trigger.

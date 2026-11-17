@@ -14,7 +14,9 @@
     // `${PUBLIC_URL}/mcp`, so set this to the deployed URL before `wrangler deploy`.
     "PUBLIC_URL": "https://openscribe-cloud.shashankmay6.workers.dev",
     // Linked from the landing page.
-    "APP_DOWNLOAD_URL": "https://github.com/shashankanil/openscribe/releases/latest"
+    "APP_DOWNLOAD_URL": "https://github.com/shashankanil/openscribe/releases/latest",
+    // Per-user storage cap for screenshots and recordings in R2 (5 GB).
+    "MEDIA_QUOTA_BYTES": "5368709120"
   },
   "d1_databases": [
     {
@@ -29,6 +31,13 @@
       // OAuth grants/tokens/clients (workers-oauth-provider) and short-lived login state.
       "binding": "OAUTH_KV",
       "id": "434204c7a50141c980f0384f847a5a70"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // Screenshots and meeting recordings, keyed u/{userId}/{documentId}/{attachmentId}.
+      "binding": "MEDIA",
+      "bucket_name": "openscribe-media"
     }
   ],
   "observability": { "enabled": true },

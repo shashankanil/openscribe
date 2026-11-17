@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Settings → AI & MCP: connect notes and meetings to LLM apps, locally or through OpenScribe Cloud.
+/// Settings → AI → Connect AI apps: connect notes and meetings to LLM apps, locally or through OpenScribe Cloud.
 struct ContextAccessView: View {
     @ObservedObject var controller: AppController
     @ObservedObject var cloud: CloudSyncController
@@ -118,6 +118,17 @@ struct ContextAccessView: View {
                         })).labelsHidden().toggleStyle(.switch)
                     }
                     FlowRowDivider()
+                    FlowSettingsRow(title: "Include screenshots", detail: "Screenshots from your day notes, so AI apps can look at them.",
+                                    symbol: "photo") {
+                        mediaToggle("Include screenshots", \.cloudSyncScreenshots)
+                    }
+                    FlowRowDivider()
+                    FlowSettingsRow(title: "Include meeting recordings",
+                                    detail: "Each meeting’s audio, compressed to about 20 MB an hour. Transcripts and summaries sync either way.",
+                                    symbol: "waveform") {
+                        mediaToggle("Include meeting recordings", \.cloudSyncRecordings)
+                    }
+                    FlowRowDivider()
                     FlowSettingsRow(title: "Connector URL", detail: "In claude.ai or ChatGPT, add a custom connector with this URL and sign in with the same Google account.",
                                     symbol: "link") {
                         copyButton("Copy URL", value: cloud.mcpURL, confirmation: "Connector URL copied")
@@ -152,8 +163,17 @@ struct ContextAccessView: View {
         }
     }
 
+    private func mediaToggle(_ label: String, _ key: WritableKeyPath<AppSettings, Bool>) -> some View {
+        Toggle(label, isOn: Binding(get: { controller.settings[keyPath: key] }, set: { value in
+            controller.updateSettings { $0[keyPath: key] = value }
+            if value { cloud.scheduleSync(after: 0) }
+        }))
+        .labelsHidden().toggleStyle(.switch).disabled(!controller.settings.cloudSyncEnabled)
+    }
+
     private var syncDetail: String {
         if !controller.settings.cloudSyncEnabled { return "Paused. Turn on to upload changes automatically." }
+        if let progress = cloud.mediaProgress { return progress + "…" }
         if cloud.syncing { return "Syncing…" }
         var parts: [String] = []
         if let count = cloud.documentCount { parts.append("\(count) in the cloud") }
@@ -164,7 +184,7 @@ struct ContextAccessView: View {
 
     private var cloudFooter: String {
         cloud.signedIn
-            ? "Changes upload a few seconds after you make them. Only you can read your documents."
+            ? "Changes upload a few seconds after you make them. Only you can read your documents and files. Turning a file type off removes those files from the cloud."
             : "Optional. Your library stays on this Mac unless you sign in."
     }
 

@@ -13,15 +13,18 @@ public struct ContextLibrary: Sendable {
     public let meetingInfo: [String: MeetingInfo]
     /// Text that is searchable but not part of the document body (e.g. text recognized in screenshots).
     public let searchExtras: [String: String]
+    /// Screenshots and recordings by document id, oldest first.
+    public let attachments: [String: [ContextAttachment]]
     /// Problems encountered while loading (unreadable files). Never fatal.
     public let warnings: [String]
 
     public init(root: URL, documents: [ContextDocument], meetingInfo: [String: MeetingInfo] = [:],
-                searchExtras: [String: String] = [:], warnings: [String] = []) {
+                searchExtras: [String: String] = [:], attachments: [String: [ContextAttachment]] = [:], warnings: [String] = []) {
         self.root = root
         self.documents = documents.sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
         self.meetingInfo = meetingInfo
         self.searchExtras = searchExtras
+        self.attachments = attachments
         self.warnings = warnings
     }
 
@@ -45,6 +48,12 @@ public struct ContextLibrary: Sendable {
         let wanted = id.trimmingCharacters(in: .whitespacesAndNewlines)
         return documents.first { $0.id == wanted } ?? documents.first { $0.id.caseInsensitiveCompare(wanted) == .orderedSame }
     }
+
+    public func attachment(documentID: String, id: String) -> ContextAttachment? {
+        guard let document = document(id: documentID) else { return nil }
+        let wanted = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return attachments[document.id]?.first { $0.id.caseInsensitiveCompare(wanted) == .orderedSame }
+    }
 }
 
 /// Reloads the profile from disk on demand, re-parsing only files whose modification date or size changed.
@@ -61,6 +70,7 @@ public final class ContextLibraryCache {
         var stamp: Stamp
         var documents: [ContextDocument]
         var extras: [String: String]
+        var attachments: [String: [ContextAttachment]]
         var warning: String?
     }
 
@@ -68,6 +78,7 @@ public final class ContextLibraryCache {
         var stamp: Stamp
         var document: ContextDocument?
         var status: String
+        var recording: ContextAttachment?
         var warning: String?
     }
 
@@ -90,13 +101,15 @@ public final class ContextLibraryCache {
         let notesURL = root.appendingPathComponent("notes.json")
         var noteDocuments: [ContextDocument] = []
         var extras: [String: String] = [:]
+        var attachments: [String: [ContextAttachment]] = [:]
         if let stamp = Self.stamp(notesURL) {
             signature[notesURL.path] = stamp
             if notes?.stamp != stamp {
-                notes = Self.loadNotes(notesURL, stamp: stamp)
+                notes = Self.loadNotes(notesURL, root: root, stamp: stamp)
             }
             noteDocuments = notes?.documents ?? []
             extras = notes?.extras ?? [:]
+            attachments = notes?.attachments ?? [:]
             if let warning = notes?.warning { warnings.append(warning) }
         } else {
             notes = nil
@@ -123,13 +136,14 @@ public final class ContextLibraryCache {
             if let document = entry.document {
                 meetingDocuments.append(document)
                 info[document.id] = .init(status: entry.status)
+                if let recording = entry.recording { attachments[document.id] = [recording] }
             }
         }
         meetings = meetings.filter { seen.contains($0.key) }
 
         if let lastLibrary, signature == lastSignature { return lastLibrary }
         let library = ContextLibrary(root: root, documents: noteDocuments + meetingDocuments, meetingInfo: info,
-                                     searchExtras: extras, warnings: warnings)
+                                     searchExtras: extras, attachments: attachments, warnings: warnings)
         lastLibrary = library
         lastSignature = signature
         lastIndex = nil
@@ -152,20 +166,23 @@ public final class ContextLibraryCache {
                      size: (attributes[.size] as? NSNumber)?.intValue ?? 0)
     }
 
-    private static func loadNotes(_ url: URL, stamp: Stamp) -> NotesEntry {
+    private static func loadNotes(_ url: URL, root: URL, stamp: Stamp) -> NotesEntry {
         do {
             let data = try Data(contentsOf: url)
             let notes = try JSONDecoder().decode(LossyArray<StoredNote>.self, from: data).elements
             var documents: [ContextDocument] = []
             var extras: [String: String] = [:]
+            var attachments: [String: [ContextAttachment]] = [:]
             for note in notes {
                 guard let normalized = ContextNormalizer.document(for: note, fallbackDate: stamp.modified) else { continue }
                 documents.append(normalized.document)
                 if !normalized.searchExtra.isEmpty { extras[normalized.document.id] = normalized.searchExtra }
+                let screenshots = AttachmentScanner.screenshots(in: note, documentID: normalized.document.id, root: root)
+                if !screenshots.isEmpty { attachments[normalized.document.id] = screenshots.sorted { $0.createdAt < $1.createdAt } }
             }
-            return NotesEntry(stamp: stamp, documents: documents, extras: extras, warning: nil)
+            return NotesEntry(stamp: stamp, documents: documents, extras: extras, attachments: attachments, warning: nil)
         } catch {
-            return NotesEntry(stamp: stamp, documents: [], extras: [:],
+            return NotesEntry(stamp: stamp, documents: [], extras: [:], attachments: [:],
                               warning: "Could not read \(url.lastPathComponent): \(error.localizedDescription)")
         }
     }
@@ -175,13 +192,16 @@ public final class ContextLibraryCache {
             let meeting = try JSONDecoder().decode(StoredMeeting.self, from: Data(contentsOf: url))
             // The app ignores a meeting whose id does not match its folder; do the same.
             if let id = meeting.id, id.caseInsensitiveCompare(directoryID) != .orderedSame {
-                return MeetingEntry(stamp: stamp, document: nil, status: meeting.status,
+                return MeetingEntry(stamp: stamp, document: nil, status: meeting.status, recording: nil,
                                     warning: "Skipped Meetings/\(directoryID): id does not match folder")
             }
             let document = ContextNormalizer.document(for: meeting, id: directoryID, modified: stamp.modified)
-            return MeetingEntry(stamp: stamp, document: document, status: meeting.status, warning: nil)
+            let recording = AttachmentScanner.recording(meetingDirectory: url.deletingLastPathComponent(), documentID: directoryID,
+                                                        status: meeting.status, title: document.title,
+                                                        createdAt: document.createdAt, duration: meeting.duration)
+            return MeetingEntry(stamp: stamp, document: document, status: meeting.status, recording: recording, warning: nil)
         } catch {
-            return MeetingEntry(stamp: stamp, document: nil, status: "",
+            return MeetingEntry(stamp: stamp, document: nil, status: "", recording: nil,
                                 warning: "Could not read Meetings/\(directoryID)/meeting.json: \(error.localizedDescription)")
         }
     }

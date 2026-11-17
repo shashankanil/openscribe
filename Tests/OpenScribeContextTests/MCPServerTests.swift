@@ -34,7 +34,7 @@ final class MCPServerTests: XCTestCase {
         }
         let response = try initialize("1999-01-01")
         XCTAssertEqual(response["id"], 1)
-        XCTAssertEqual(response["result"]?["protocolVersion"], "2025-06-18")
+        XCTAssertEqual(response["result"]?["protocolVersion"], "2025-11-25")
         XCTAssertEqual(response["result"]?["serverInfo"]?["name"], "openscribe")
         XCTAssertEqual(response["result"]?["capabilities"]?["tools"]?["listChanged"], false)
     }
@@ -63,7 +63,7 @@ final class MCPServerTests: XCTestCase {
     func testToolsListAdvertisesReadOnlyToolsWithSchemas() throws {
         _ = try initialize("2025-06-18")
         let tools = try XCTUnwrap(request(2, "tools/list")["result"]?["tools"]?.arrayValue)
-        XCTAssertEqual(tools.compactMap { $0["name"]?.stringValue }, ["search", "fetch", "list_recent", "get_meeting", "list_action_items"])
+        XCTAssertEqual(tools.compactMap { $0["name"]?.stringValue }, ["search", "fetch", "list_recent", "get_meeting", "list_action_items", "get_attachment"])
         XCTAssertTrue(tools.allSatisfy { $0["annotations"]?["readOnlyHint"] == true && $0["outputSchema"] != nil && $0["inputSchema"] != nil })
 
         _ = try initialize("2024-11-05")

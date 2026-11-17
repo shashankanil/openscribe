@@ -93,6 +93,43 @@ final class ToolTests: XCTestCase {
         try ContextTools.call(name, arguments: arguments, library: library, now: fixture.now)
     }
 
+    func testScreenshotsAndRecordingsAreAttachments() throws {
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")!
+        let shot = fixture.root.appendingPathComponent("Attachments/shot.png")
+        try FileManager.default.createDirectory(at: shot.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try png.write(to: shot)
+        let chunk = fixture.root.appendingPathComponent("Meetings/\(FixtureProfile.planningMeetingID)/S1/system/chunk-00000.wav")
+        try FileManager.default.createDirectory(at: chunk.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 2_000).write(to: chunk)
+        try fixture.writeJSON(["filename": "chunk-00000.wav", "start": 4.5, "duration": 10], to: chunk.appendingPathExtension("json"))
+        library = ContextLibrary.load(root: fixture.root)
+
+        let screenshots = library.attachments[FixtureProfile.dayNoteID] ?? []
+        XCTAssertEqual(screenshots.map(\.id), ["C0000000-0000-0000-0000-000000000003"])
+        let recording = try XCTUnwrap(library.attachments[FixtureProfile.planningMeetingID]?.first)
+        XCTAssertEqual(recording.kind, .recording)
+        XCTAssertEqual(recording.parts.map(\.track), ["system"])
+        XCTAssertEqual(recording.parts.first?.start, 4.5)
+        XCTAssertNil(library.attachments[FixtureProfile.retroMeetingID], "No audio on disk, no recording")
+
+        let fetched = try call("fetch", ["id": .string(FixtureProfile.dayNoteID)])
+        XCTAssertTrue(fetched.text.contains("## Attachments"))
+        XCTAssertEqual(fetched.structured?["attachments"]?.arrayValue?.count, 1)
+
+        let image = try call("get_attachment", ["documentId": .string(FixtureProfile.dayNoteID), "id": "C0000000-0000-0000-0000-000000000003"])
+        XCTAssertFalse(image.isError)
+        XCTAssertEqual(image.extraContent.first?["type"], "image")
+        XCTAssertEqual(image.extraContent.first?["data"]?.stringValue, png.base64EncodedString())
+        XCTAssertEqual(image.json["content"]?.arrayValue?.count, 2)
+
+        let audio = try call("get_attachment", ["documentId": .string(FixtureProfile.planningMeetingID), "id": "recording"])
+        XCTAssertTrue(audio.text.contains(chunk.path))
+        let meeting = try call("get_meeting", ["id": .string(FixtureProfile.planningMeetingID)])
+        XCTAssertEqual(meeting.structured?["attachments"]?.arrayValue?.first?["kind"], "recording")
+
+        XCTAssertTrue(try call("get_attachment", ["documentId": .string(FixtureProfile.dayNoteID), "id": "nope"]).isError)
+    }
+
     func testDefinitions() {
         let tools = ContextTools.definitions
         XCTAssertEqual(tools.compactMap { $0["name"]?.stringValue }, ContextTools.names)

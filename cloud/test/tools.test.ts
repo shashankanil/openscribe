@@ -10,7 +10,7 @@ import {
   search,
   TRANSCRIPT_CHAR_LIMIT,
 } from "../src/tools";
-import { daysAgo, makeDoc, resetDb, seedUser } from "./helpers";
+import { daysAgo, makeDoc, media, resetDb, seedUser } from "./helpers";
 
 const A = "user-a";
 const B = "user-b";
@@ -90,7 +90,7 @@ describe("search", () => {
 
 describe("fetch", () => {
   it("returns markdown plus the normalized document", async () => {
-    const { text, structured } = await fetchDocument(env.DB, A, { id: "a-meeting" });
+    const { text, structured } = await fetchDocument(env.DB, A, { id: "a-meeting" }, media(A));
     expect(text).toContain("# Design sync");
     expect(text).toContain("## Summary");
     expect(text).toContain("- [ ] Alice: send onboarding mocks");
@@ -99,13 +99,13 @@ describe("fetch", () => {
   });
 
   it("refuses other users' and deleted documents", async () => {
-    await expect(fetchDocument(env.DB, B, { id: "a-meeting" })).rejects.toThrow(/No document/);
-    await expect(fetchDocument(env.DB, A, { id: "a-deleted" })).rejects.toThrow(/No document/);
+    await expect(fetchDocument(env.DB, B, { id: "a-meeting" }, media(B))).rejects.toThrow(/No document/);
+    await expect(fetchDocument(env.DB, A, { id: "a-deleted" }, media(A))).rejects.toThrow(/No document/);
   });
 
   it("truncates long transcripts with a note", async () => {
     await upsertDocuments(env.DB, A, [makeDoc({ id: "long", kind: "meeting", transcript: "x".repeat(TRANSCRIPT_CHAR_LIMIT + 500) })]);
-    const { structured, text } = await fetchDocument(env.DB, A, { id: "long" });
+    const { structured, text } = await fetchDocument(env.DB, A, { id: "long" }, media(A));
     expect(structured.transcript!.length).toBeLessThan(TRANSCRIPT_CHAR_LIMIT + 400);
     expect(structured.transcript).toContain("Call get_meeting");
     expect(text).toContain("Transcript truncated");
@@ -125,18 +125,18 @@ describe("list_recent", () => {
 
 describe("get_meeting", () => {
   it("returns meeting details and the transcript only on request", async () => {
-    const without = await getMeeting(env.DB, A, { id: "a-meeting" });
+    const without = await getMeeting(env.DB, A, { id: "a-meeting" }, media(A));
     expect(without.structured).toMatchObject({ title: "Design sync", durationSeconds: 1830, notes: "Remember to share the Figma file." });
     expect(without.structured).not.toHaveProperty("transcript");
     expect(without.text).not.toContain("## Transcript");
-    const withT = await getMeeting(env.DB, A, { id: "a-meeting", includeTranscript: true });
+    const withT = await getMeeting(env.DB, A, { id: "a-meeting", includeTranscript: true }, media(A));
     expect(withT.structured.transcript).toContain("[00:12] Bob");
     expect(withT.text).toContain("## Transcript");
   });
 
   it("rejects notes and other users' meetings", async () => {
-    await expect(getMeeting(env.DB, A, { id: "a-title" })).rejects.toThrow(/No meeting/);
-    await expect(getMeeting(env.DB, B, { id: "a-meeting" })).rejects.toThrow(/No meeting/);
+    await expect(getMeeting(env.DB, A, { id: "a-title" }, media(A))).rejects.toThrow(/No meeting/);
+    await expect(getMeeting(env.DB, B, { id: "a-meeting" }, media(B))).rejects.toThrow(/No meeting/);
   });
 });
 

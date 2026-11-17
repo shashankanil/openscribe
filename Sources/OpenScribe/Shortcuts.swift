@@ -57,8 +57,8 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     static let capture: [ShortcutAction] = [.meeting, .screenshotArea, .screenshotWindow, .screenshotScreen]
 }
 
-/// A key combination (any key plus modifiers), a function key on its own, or a single modifier key
-/// on its own such as Right ⌘ or Globe.
+/// A key combination (any key plus modifiers), a function key on its own, a single modifier key
+/// on its own such as Right ⌘ or Globe, or an extra mouse button (Mouse 4, Mouse 5…), optionally with modifiers.
 struct KeyShortcut: Codable, Equatable, Hashable {
     var keyCode: UInt16
     var modifiers: UInt
@@ -68,6 +68,25 @@ struct KeyShortcut: Codable, Equatable, Hashable {
     var isGlobe: Bool { keyCode == 63 }
     /// A lone modifier key. These are watched as the key goes down and up, never as a combination.
     var isModifierOnly: Bool { KeyShortcut.modifierKeys[keyCode] != nil }
+    /// Mouse buttons are stored as virtual key codes above any real key code.
+    var isMouseButton: Bool { keyCode >= KeyShortcut.mouseBase }
+    /// The CGEvent button number (2 = middle, 3 = Mouse 4/back, 4 = Mouse 5/forward…).
+    var mouseButton: Int? { isMouseButton ? Int(keyCode - KeyShortcut.mouseBase) : nil }
+
+    static let mouseBase: UInt16 = 0x1000
+
+    static func mouse(_ button: Int, modifiers: NSEvent.ModifierFlags = []) -> KeyShortcut {
+        KeyShortcut(keyCode: mouseBase + UInt16(clamping: max(0, button)), modifiers: modifiers)
+    }
+
+    static func mouseButtonName(_ button: Int) -> String {
+        switch button {
+        case 0: return "Left click"
+        case 1: return "Right click"
+        case 2: return "Middle click"
+        default: return "Mouse \(button + 1)"
+        }
+    }
 
     init(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String? = nil) {
         self.keyCode = keyCode
@@ -80,6 +99,8 @@ struct KeyShortcut: Codable, Equatable, Hashable {
     static let optionSpace = KeyShortcut(keyCode: 49, modifiers: .option, display: "⌥ Space")
     static let rightCommand = KeyShortcut(keyCode: 54, modifiers: [])
     static let rightOption = KeyShortcut(keyCode: 61, modifiers: [])
+    static let mouse4 = KeyShortcut.mouse(3)
+    static let mouse5 = KeyShortcut.mouse(4)
 
     /// Lone modifier keys: key code → (name, device-specific flag bit, generic flag).
     static let modifierKeys: [UInt16: (name: String, device: UInt64, generic: NSEvent.ModifierFlags)] = [
@@ -96,6 +117,10 @@ struct KeyShortcut: Codable, Equatable, Hashable {
     /// Whether this can be used as a global shortcut at all.
     var isUsable: Bool {
         if isModifierOnly { return true }
+        if let button = mouseButton {
+            // Left and right clicks are never shortcuts; a middle click needs a modifier.
+            return button >= 3 || (button == 2 && !modifierFlags.subtracting(.function).isEmpty)
+        }
         if keyCode == UInt16(kVK_Escape) { return false }
         return !modifierFlags.subtracting(.function).isEmpty || KeyShortcut.functionKeys.contains(keyCode)
     }
@@ -103,7 +128,7 @@ struct KeyShortcut: Codable, Equatable, Hashable {
     /// Option-only and Option-Shift-only combinations can't be registered as Carbon hot keys from
     /// macOS 15 on, and lone modifiers never could. These need the keyboard event tap (Accessibility).
     var needsEventTap: Bool {
-        if isModifierOnly { return true }
+        if isModifierOnly || isMouseButton { return true }
         let flags = modifierFlags.intersection([.command, .control, .option, .shift])
         if #available(macOS 15, *) { return flags == .option || flags == [.option, .shift] }
         return false
@@ -129,7 +154,7 @@ enum ShortcutDefaults {
     static var lists: [String: [KeyShortcut]] { Dictionary(uniqueKeysWithValues: bindings.map { ($0.key.rawValue, [$0.value]) }) }
 
     /// Quick picks offered for keys that act while held.
-    static let holdPresets: [KeyShortcut] = [.globe, .rightCommand, .rightOption]
+    static let holdPresets: [KeyShortcut] = [.globe, .rightCommand, .rightOption, .mouse4, .mouse5]
 
     /// Earlier versions had a single key plus a mode. Keep that key working as the user set it up.
     static func migrated(keyCode: UInt16, modifiers: UInt, display: String, mode: DictationMode) -> [String: KeyShortcut] {
@@ -335,6 +360,7 @@ final class HotkeyCenter {
 
     private func installTap() -> Bool {
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue) | (1 << CGEventType.otherMouseUp.rawValue)
         let context = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                           eventsOfInterest: CGEventMask(mask), callback: { _, type, event, context in
@@ -359,6 +385,10 @@ final class HotkeyCenter {
             let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             let consumed = handleKey(type: type, keyCode: keyCode, flags: event.flags.rawValue,
                                      isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0)
+            return consumed ? nil : Unmanaged.passUnretained(event)
+        case .otherMouseDown, .otherMouseUp:
+            let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+            let consumed = handleMouse(down: type == .otherMouseDown, button: button, flags: event.flags.rawValue)
             return consumed ? nil : Unmanaged.passUnretained(event)
         default:
             return Unmanaged.passUnretained(event)
@@ -404,6 +434,15 @@ final class HotkeyCenter {
         default:
             return false
         }
+    }
+
+    /// Extra mouse buttons behave like keys: press, hold and release.
+    @discardableResult
+    func handleMouse(down: Bool, button: Int, flags: UInt64) -> Bool {
+        guard button >= 2 else { return false }
+        let code = KeyShortcut.mouseBase + UInt16(clamping: button)
+        if !down, heldKeys[code] == nil { return false }
+        return handleKey(type: down ? .keyDown : .keyUp, keyCode: code, flags: flags)
     }
 
     private func matches(_ shortcut: KeyShortcut, keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {

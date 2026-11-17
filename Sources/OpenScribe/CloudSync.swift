@@ -197,8 +197,10 @@ final class CloudSyncController: ObservableObject {
         let state = loadState()
         let serverID = server.absoluteString
         // Reading and hashing every document happens off the main thread.
-        let plan = await Task.detached(priority: .utility) {
-            Self.plan(library: ContextLibrary.load(root: root), state: state.server == serverID ? state : SyncState(server: serverID), now: Date())
+        let (plan, attachments) = await Task.detached(priority: .utility) {
+            let library = ContextLibrary.load(root: root)
+            return (Self.plan(library: library, state: state.server == serverID ? state : SyncState(server: serverID), now: Date()),
+                    library.attachments)
         }.value
         var next = plan.state
         do {
@@ -213,17 +215,137 @@ final class CloudSyncController: ObservableObject {
                 }
                 saveState(next) // Checkpoint after each batch so an interruption resumes, not restarts.
             }
+            let mediaWarning = try await syncMedia(attachments, token: token, state: &next)
             next.lastSync = Date()
             saveState(next)
             lastSync = next.lastSync
-            error = nil
-            if !plan.batches.isEmpty { await refreshAccount() }
+            error = mediaWarning
+            if !plan.batches.isEmpty || mediaChanged { await refreshAccount() }
         } catch let failure as CloudError where failure == .unauthorized {
             clearSession()
             error = "Your OpenScribe Cloud session ended. Sign in again to keep syncing."
         } catch {
             self.error = "Sync paused: \(error.localizedDescription). It will retry automatically."
         }
+    }
+
+    // MARK: Media
+
+    /// Progress of the current media upload, for the settings page.
+    @Published private(set) var mediaProgress: String?
+    private var mediaChanged = false
+
+    struct MediaWork: Sendable, Equatable {
+        var uploads: [ContextAttachment]
+        var deletions: [String]
+    }
+
+    nonisolated static func mediaKey(_ attachment: ContextAttachment) -> String { "\(attachment.documentID)/\(attachment.id)" }
+
+    /// Which attachments to upload or remove. Only documents the server already has are considered,
+    /// and a file is re-sent only when its source files change. Screenshots go first: they're small.
+    nonisolated static func planMedia(_ attachments: [String: [ContextAttachment]], state: SyncState,
+                                      screenshots: Bool, recordings: Bool) -> MediaWork {
+        let media = state.media ?? [:]
+        var wanted: [String: ContextAttachment] = [:]
+        for (documentID, items) in attachments where state.entries[documentID] != nil {
+            for item in items where item.kind == .screenshot ? screenshots : recordings {
+                wanted[mediaKey(item)] = item
+            }
+        }
+        let uploads = wanted.values.filter { media[mediaKey($0)]?.stamp != $0.sourceStamp }
+            .sorted { ($0.kind == .screenshot ? 0 : 1, $0.createdAt) < ($1.kind == .screenshot ? 0 : 1, $1.createdAt) }
+        // Documents that were deleted take their files with them on the server; just forget those.
+        let deletions = media.keys.filter { key in
+            wanted[key] == nil && state.entries[String(key.split(separator: "/").first ?? "")] != nil
+        }.sorted()
+        return MediaWork(uploads: uploads, deletions: deletions)
+    }
+
+    /// Returns a warning to show when some files couldn't be uploaded.
+    private func syncMedia(_ attachments: [String: [ContextAttachment]], token: String, state: inout SyncState) async throws -> String? {
+        mediaChanged = false
+        defer { mediaProgress = nil }
+        // Forget files whose document is gone; the server removed them with the document.
+        state.media = (state.media ?? [:]).filter { state.entries[String($0.key.split(separator: "/").first ?? "")] != nil }
+        let settings = app?.settings
+        let work = Self.planMedia(attachments, state: state, screenshots: settings?.cloudSyncScreenshots ?? true,
+                                  recordings: settings?.cloudSyncRecordings ?? true)
+        for key in work.deletions {
+            let parts = key.split(separator: "/", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            _ = try await request("api/v1/attachments/\(Self.pathComponent(parts[0]))/\(Self.pathComponent(parts[1]))", method: "DELETE", token: token)
+            state.media?.removeValue(forKey: key)
+            mediaChanged = true
+            saveState(state)
+        }
+        var warning: String?
+        for (index, attachment) in work.uploads.enumerated() {
+            guard enabled, signedIn else { return warning }
+            mediaProgress = work.uploads.count > 1 ? "Uploading files (\(index + 1) of \(work.uploads.count))" : "Uploading a file"
+            let key = Self.mediaKey(attachment)
+            let stamp = attachment.sourceStamp
+            let encoded: CloudMedia.Encoded
+            do {
+                encoded = try await Task.detached(priority: .utility) { try await CloudMedia.encode(attachment) }.value
+            } catch {
+                // An unreadable file won't get better by retrying; try again when it changes.
+                state.media = (state.media ?? [:]).merging([key: .init(stamp: stamp, sha256: "", bytes: 0)]) { $1 }
+                saveState(state)
+                continue
+            }
+            defer { try? FileManager.default.removeItem(at: encoded.url) }
+            if let existing = state.media?[key], existing.sha256 == encoded.sha256 {
+                state.media?[key]?.stamp = stamp // Same bytes as last time.
+                saveState(state)
+                continue
+            }
+            guard encoded.bytes <= CloudMedia.maximumUploadBytes else {
+                state.media = (state.media ?? [:]).merging([key: .init(stamp: stamp, sha256: "", bytes: 0)]) { $1 }
+                saveState(state)
+                continue
+            }
+            do {
+                try await upload(attachment, encoded: encoded, token: token)
+            } catch let CloudError.server(status, message) where status == 413 {
+                if message == "quota_exceeded" {
+                    return "OpenScribe Cloud storage is full, so new screenshots and recordings aren’t uploading. Notes and meetings still sync."
+                }
+                warning = "A file was too large to upload."
+                continue
+            } catch let CloudError.server(status, _) where status == 404 || status == 415 || status == 400 {
+                continue // The document isn't on the server yet, or the file was refused; retry on the next sync.
+            }
+            var media = state.media ?? [:]
+            media[key] = .init(stamp: stamp, sha256: encoded.sha256, bytes: encoded.bytes)
+            state.media = media
+            mediaChanged = true
+            saveState(state)
+        }
+        return warning
+    }
+
+    private func upload(_ attachment: ContextAttachment, encoded: CloudMedia.Encoded, token: String) async throws {
+        let path = "api/v1/attachments/\(Self.pathComponent(attachment.documentID))/\(Self.pathComponent(attachment.id))"
+        var request = URLRequest(url: server.appendingPathComponent(path))
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 600
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(encoded.contentType, forHTTPHeaderField: "Content-Type")
+        request.setValue(attachment.kind.rawValue, forHTTPHeaderField: "X-OpenScribe-Kind")
+        request.setValue(encoded.sha256, forHTTPHeaderField: "X-OpenScribe-Sha256")
+        request.setValue(ContextDate.string(attachment.createdAt), forHTTPHeaderField: "X-OpenScribe-Created-At")
+        if attachment.durationSeconds > 0 { request.setValue(String(format: "%.1f", attachment.durationSeconds), forHTTPHeaderField: "X-OpenScribe-Duration") }
+        let caption = String(attachment.caption.prefix(500))
+        if !caption.isEmpty, let encodedCaption = caption.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
+            request.setValue(encodedCaption, forHTTPHeaderField: "X-OpenScribe-Caption")
+        }
+        let (data, response) = try await session.upload(for: request, fromFile: encoded.url)
+        try Self.check(response, data: data)
+    }
+
+    nonisolated private static func pathComponent(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_."))) ?? value
     }
 
     struct PlannedDocument: Sendable {
@@ -300,9 +422,18 @@ final class CloudSyncController: ObservableObject {
             var kind: String
             var createdAt: Date
         }
+        struct MediaEntry: Codable, Sendable, Equatable {
+            /// `ContextAttachment.sourceStamp` when this was last handled.
+            var stamp: String
+            /// Empty when the file couldn't be prepared; it's retried once the source changes.
+            var sha256: String
+            var bytes: Int
+        }
         var server: String
         var entries: [String: Entry] = [:]
         var lastSync: Date?
+        /// Uploaded attachments by "documentID/attachmentID". Optional so older state files still load.
+        var media: [String: MediaEntry]?
     }
 
     private var stateURL: URL { dataRoot.appendingPathComponent("cloud-sync.json") }
@@ -350,13 +481,17 @@ final class CloudSyncController: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await session.data(for: request)
+        try Self.check(response, data: data)
+        return data
+    }
+
+    private static func check(_ response: URLResponse, data: Data) throws {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 401 { throw CloudError.unauthorized }
         guard (200..<300).contains(status) else {
             struct Message: Decodable { let error: String? }
             throw CloudError.server(status, (try? JSONDecoder().decode(Message.self, from: data))?.error ?? "")
         }
-        return data
     }
 
     private static func randomToken() -> String {

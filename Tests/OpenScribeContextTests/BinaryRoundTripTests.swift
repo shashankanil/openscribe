@@ -54,7 +54,7 @@ final class BinaryRoundTripTests: XCTestCase {
         XCTAssertTrue(responses.allSatisfy { $0["jsonrpc"] == "2.0" })
         XCTAssertEqual(responses.map { $0["id"] }, [1, 2, 3, 4])
         XCTAssertEqual(responses[0]["result"]?["protocolVersion"], "2025-03-26")
-        XCTAssertEqual(responses[1]["result"]?["tools"]?.arrayValue?.count, 5)
+        XCTAssertEqual(responses[1]["result"]?["tools"]?.arrayValue?.count, 6)
         let text = try XCTUnwrap(responses[2]["result"]?["content"]?.arrayValue?.first?["text"]?.stringValue)
         XCTAssertTrue(text.contains(FixtureProfile.planningMeetingID), text)
         XCTAssertEqual(responses[3]["error"]?["code"], -32601)
