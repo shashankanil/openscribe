@@ -11,6 +11,9 @@ final class MeetingController: ObservableObject {
     private let provider = ProviderClient()
     private let speechKey: (() -> String)?
     private let languageKey: (() -> String)?
+    /// The app's current settings. Summaries use the language model chosen now, not the one saved
+    /// with the meeting, so changing the model in Settings also applies to retries and re-summaries.
+    var currentSettings: (() -> AppSettings?)?
     private let credentialRootURL: URL?
     @Published private(set) var activeID: UUID?
     @Published private(set) var isRecording = false
@@ -342,6 +345,17 @@ final class MeetingController: ObservableObject {
         try store.save(updated)
     }
 
+    /// The meeting's settings with the current language model swapped in.
+    func summarySettings(for record: MeetingRecord) -> AppSettings {
+        var settings = record.settings
+        if let current = currentSettings?() {
+            settings.languageModelProvider = current.languageModelProvider
+            settings.languageModelBaseURL = current.languageModelBaseURL
+            settings.languageModel = current.languageModel
+        }
+        return settings
+    }
+
     private func summarize(_ record: MeetingRecord) async throws -> MeetingSummary {
         let nonempty = record.segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         // Bound every request. Merge extracted facts rather than silently truncating long meetings.
@@ -369,12 +383,10 @@ final class MeetingController: ObservableObject {
             Use empty arrays when there is no evidence. Limit each category to 8 points. Preserve the meeting's language.
             If attendee notes are supplied, favor the topics they highlight, but only state what the transcript supports.
             """
-            let response = try await provider.generate(input, system: system, settings: record.settings,
-                apiKey: languageKey?() ?? CredentialStore.read(for: .languageModel, settings: record.settings, rootURL: credentialRootURL) ?? "")
-            let json = response.trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "```json", with: "").replacingOccurrences(of: "```", with: "")
-            let summary = try JSONDecoder().decode(MeetingSummary.self, from: Data(json.utf8))
-                .validated(segmentIDs: Set(batch.map(\.id)))
+            let settings = summarySettings(for: record)
+            let response = try await provider.generate(input, system: system, settings: settings,
+                apiKey: languageKey?() ?? CredentialStore.read(for: .languageModel, settings: settings, rootURL: credentialRootURL) ?? "")
+            let summary = try MeetingSummary.parse(response, segments: batch)
             combined.overview += summary.overview
             combined.decisions += summary.decisions
             combined.actions += summary.actions

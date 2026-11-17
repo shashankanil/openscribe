@@ -34,15 +34,79 @@ struct MeetingSummary: Codable, Equatable {
     var decisions: [Point]
     var actions: [Point]
 
-    func validated(segmentIDs: Set<String>) throws -> MeetingSummary {
-        for point in overview + decisions + actions {
-            guard !point.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !point.sources.isEmpty, point.sources.allSatisfy(segmentIDs.contains) else {
-                throw MeetingError.invalidSummary
+    /// Reads a model's reply leniently. Models often wrap the JSON in prose or a code fence, write a
+    /// point as a bare string, or cite a segment by file name or timestamp instead of its exact ID.
+    /// Citations are resolved against the transcript; when the model cited anything, points it could
+    /// not tie to the transcript are dropped as likely inventions. A reply with no citations at all
+    /// (a model that ignored the format) keeps its points, shown without timestamps.
+    static func parse(_ response: String, segments: [MeetingSegment]) throws -> MeetingSummary {
+        guard let start = response.firstIndex(of: "{"), let end = response.lastIndex(of: "}"), start < end,
+              let object = try? JSONSerialization.jsonObject(with: Data(response[start...end].utf8)) as? [String: Any] else {
+            throw MeetingError.invalidSummary
+        }
+        let resolve = SourceResolver(segments: segments)
+        func points(_ keys: [String]) -> [(text: String, cited: [String], claimed: Bool)] {
+            let raw = keys.lazy.compactMap { object[$0] as? [Any] }.first ?? []
+            return raw.compactMap { item in
+                let text: String
+                var claimed: [String] = []
+                if let string = item as? String {
+                    text = string
+                } else if let dict = item as? [String: Any] {
+                    text = (dict["text"] ?? dict["point"] ?? dict["summary"] ?? dict["action"] ?? dict["decision"]) as? String ?? ""
+                    let sources = dict["sources"] ?? dict["source"] ?? dict["segment_ids"] ?? dict["ids"]
+                    claimed = (sources as? [Any])?.compactMap { "\($0)" } ?? (sources.map { ["\($0)"] } ?? [])
+                } else { return nil }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return (trimmed, resolve(claimed), !claimed.isEmpty)
             }
         }
-        return self
+        let overview = points(["overview", "summary", "key_points", "topics"])
+        let decisions = points(["decisions"])
+        let actions = points(["actions", "action_items", "actionItems"])
+        let all = overview + decisions + actions
+        let anyCited = all.contains { !$0.cited.isEmpty }
+        func keep(_ list: [(text: String, cited: [String], claimed: Bool)]) -> [Point] {
+            list.filter { !anyCited || !$0.cited.isEmpty }.map { Point(text: $0.text, sources: $0.cited) }
+        }
+        return MeetingSummary(overview: keep(overview), decisions: keep(decisions), actions: keep(actions))
     }
+
+    /// Maps what a model cited to real segment IDs: exact ID, file name, or a [mm:ss] timestamp.
+    private struct SourceResolver {
+        let ids: Set<String>
+        let byName: [String: String]
+        let byStamp: [String: String]
+
+        init(segments: [MeetingSegment]) {
+            ids = Set(segments.map(\.id))
+            var names: [String: String] = [:], stamps: [String: String] = [:]
+            for segment in segments {
+                let name = (segment.id as NSString).lastPathComponent
+                names[name] = names[name] == nil ? segment.id : "" // Ambiguous names resolve to nothing.
+                if stamps[segment.timestamp] == nil { stamps[segment.timestamp] = segment.id }
+            }
+            byName = names.filter { !$0.value.isEmpty }
+            byStamp = stamps
+        }
+
+        func callAsFunction(_ claimed: [String]) -> [String] {
+            var result: [String] = []
+            for raw in claimed {
+                let value = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "[]()\"'")))
+                let value2 = value.hasPrefix("ID: ") ? String(value.dropFirst(4)) : value
+                let match = ids.contains(value2) ? value2
+                    : byName[(value2 as NSString).lastPathComponent]
+                    ?? value2.range(of: #"\d{1,3}:\d{2}"#, options: .regularExpression).flatMap { byStamp[Self.pad(String(value2[$0]))] }
+                if let match, !result.contains(match) { result.append(match) }
+            }
+            return result
+        }
+
+        private static func pad(_ stamp: String) -> String { stamp.count == 4 ? "0" + stamp : stamp }
+    }
+
 }
 
 struct MeetingRecord: Codable, Identifiable {
@@ -84,7 +148,7 @@ struct MeetingRecord: Codable, Identifiable {
                 result += "## \(heading)\n\n"
                 result += points.isEmpty ? "None identified.\n\n" : points.map { point in
                     let stamps = point.sources.compactMap { id in segments.first { $0.id == id }?.timestamp }.joined(separator: ", ")
-                    return "- \(point.text) [\(stamps)]"
+                    return stamps.isEmpty ? "- \(point.text)" : "- \(point.text) [\(stamps)]"
                 }.joined(separator: "\n") + "\n\n"
             }
         }
@@ -129,7 +193,7 @@ enum MeetingError: LocalizedError {
         switch self {
         case .noSource: return "Choose microphone, system audio, or both."
         case .noAudio: return "No readable audio was found. Check the selected sources and permissions."
-        case .invalidSummary: return "The summary contained missing or invalid transcript references. Your transcript is safe; try summarizing again."
+        case .invalidSummary: return "The language model didn’t return a summary OpenScribe could read. Your transcript is safe; try again, or pick a different model in Settings → AI → API & Models."
         case .unavailableDisplay: return "System audio capture needs an available display and Screen & System Audio Recording access."
         }
     }
