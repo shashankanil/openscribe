@@ -20,6 +20,7 @@ struct SettingsView: View {
                 switch section {
                 case .connections: connectionsTab
                 case .ai: ContextAccessView(controller: controller, cloud: controller.cloud)
+                case .phone: PhoneLinkView(controller: controller, link: controller.phoneLink)
                 case .personalize: personalizationTab
                 case .shortcuts: shortcutsTab
                 case .privacy: privacyTab
@@ -197,6 +198,7 @@ struct SettingsView: View {
         case .personalize: return "Your vocabulary, snippets, and app preferences."
         case .shortcuts: return "Keys for dictation, meetings, and screenshots."
         case .privacy: return "Choose what stays on this Mac."
+        case .phone: return "Use your Android phone as a press-to-talk microphone, and share the clipboard."
         case .permissions: return "Manage the access OpenScribe needs."
         default: return "Appearance, recording, and everyday preferences."
         }

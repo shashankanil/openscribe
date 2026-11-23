@@ -2,3 +2,9 @@
 dist/
 .DS_Store
 *.xcuserstate
+# Never commit signing keys or local secrets (release keys live outside the repo).
+*.p12
+*.pem
+*.jks
+*.keystore
+.env

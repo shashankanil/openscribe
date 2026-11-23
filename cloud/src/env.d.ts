@@ -8,6 +8,8 @@ declare namespace Cloudflare {
     OAUTH_KV: KVNamespace;
     /** Screenshots and recordings (see src/attachments.ts). */
     MEDIA: R2Bucket;
+    /** Phone Link relay Durable Object (src/link-relay.ts). */
+    LINK_RELAY: DurableObjectNamespace<import("./link-relay").LinkRelay>;
     /** Per-user R2 quota in bytes, as a decimal string. */
     MEDIA_QUOTA_BYTES: string;
     /** Public origin, no trailing slash, e.g. https://openscribe-cloud.example.workers.dev */

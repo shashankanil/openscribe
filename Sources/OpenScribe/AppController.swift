@@ -14,6 +14,18 @@ final class AppController: ObservableObject {
     let meetings: MeetingController
     let calendar: CalendarMeetingController
     let cloud: CloudSyncController
+    let phoneLink: PhoneLinkController
+    /// Dictation driven by a paired phone's press-to-talk, from its start until the phone is told the outcome.
+    private var phoneTalk: PhoneTalkSession?
+    private var phoneTalkStage = PhoneTalkStage.starting
+    private enum PhoneTalkStage { case starting, recording, processing }
+    /// The Mac app a phone dictation is going to, captured when it starts, and whether it will be pasted there.
+    private var phoneTalkTarget: (name: String?, pastes: Bool) = (nil, false)
+    /// Phone audio that arrives while the recording is still starting.
+    private var phoneAudioBacklog: [Data] = []
+    /// The phone is transcribing this talk itself and will send text; there is no Mac recording.
+    private var phoneTextMode = false
+    private var phoneTalkStartedAt = Date()
     private var calendarSubscription: AnyCancellable?
     private var meetingSubscription: AnyCancellable?
     private var noticeSubscriptions = Set<AnyCancellable>()
@@ -24,6 +36,7 @@ final class AppController: ObservableObject {
             if capturePhase != .recording { captureStartedAt = nil }
             else if oldValue != .recording { captureStartedAt = Date() }
             hotkeys.setEscapeActive(capturePhase == .recording)
+            phoneTalkPhaseChanged()
         }
     }
     @Published private(set) var captureStartedAt: Date?
@@ -97,6 +110,7 @@ final class AppController: ObservableObject {
         meetings = MeetingController(store: MeetingStore(root: root.appendingPathComponent("Meetings")), credentialRootURL: root)
         calendar = CalendarMeetingController()
         cloud = CloudSyncController(dataRoot: root)
+        phoneLink = PhoneLinkController(root: root)
         recovery = DictationRecoveryStore(root: root.appendingPathComponent("DictationRecovery"))
         recorder = AudioRecorder()
         permissions = PermissionCenter()
@@ -113,6 +127,8 @@ final class AppController: ObservableObject {
         }
         calendarSubscription = calendar.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         cloud.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &noticeSubscriptions)
+        phoneLink.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &noticeSubscriptions)
+        phoneLink.onNotice = { [weak self] message in self?.flash(message) }
         permissions.onChange = { [weak self] in self?.refreshPermissions() }
         Publishers.Merge(meetings.$error, calendar.$error)
             .removeDuplicates()
@@ -171,6 +187,10 @@ final class AppController: ObservableObject {
         hasBooted = true
         calendar.boot(app: self)
         cloud.boot(app: self)
+        phoneLink.talkHandler = self
+        phoneLink.speechConfig = { [weak self] in self?.phoneSpeechMessage() ?? PhoneLinkMessage(t: "speech") }
+        phoneLink.attachCloud(cloud)
+        phoneLink.apply(settings)
         applyTheme(settings.theme)
         permissions.refresh()
         NSLog("OpenScribe booted")
@@ -233,7 +253,7 @@ final class AppController: ObservableObject {
         }
     }
 
-    func startCapture(target: NSRunningApplication? = nil) {
+    func startCapture(target: NSRunningApplication? = nil, phone: PhoneTalkSession? = nil) {
         guard !meetings.occupiesCapture else {
             showTransientError("Finish the meeting recording before starting dictation.")
             return
@@ -249,7 +269,7 @@ final class AppController: ObservableObject {
             setupMissing(.speechKey)
             return
         }
-        guard permissions.microphoneReady else {
+        guard phone != nil || permissions.microphoneReady else {
             capturePhase = .idle
             captureHint = "Allow microphone access to dictate"
             showPermissions()
@@ -297,13 +317,21 @@ final class AppController: ObservableObject {
                         }
                     })
                 }
-                try await recorder.start(directoryURL: recovery.audioDirectory(job.id), deviceUID: settings.microphoneDeviceUID,
-                                         liveSink: dictationStreaming?.makeSink())
+                if phone != nil {
+                    try recorder.startExternal(directoryURL: recovery.audioDirectory(job.id), liveSink: dictationStreaming?.makeSink())
+                    for pcm in phoneAudioBacklog { recorder.appendExternal(pcm16: pcm) }
+                    phoneAudioBacklog.removeAll()
+                } else {
+                    try await recorder.start(directoryURL: recovery.audioDirectory(job.id), deviceUID: settings.microphoneDeviceUID,
+                                             liveSink: dictationStreaming?.makeSink())
+                }
                 try Task.checkCancellation()
                 guard captureGeneration == generation else { return }
                 if settings.interactionSounds { sounds.play(.start) }
+                if let phone { phoneTalkTarget = (recordingSourceApplication, settings.pasteIntoFocusedApp && !onboardingVisible
+                                                      && recordingSourceBundleIdentifier != nil) }
                 capturePhase = .recording
-                captureHint = "Speak naturally"
+                captureHint = phone.map { "Listening on \($0.phoneName)" } ?? "Speak naturally"
                 if job.settings.dictationLiveTranscription {
                     let key = credential(for: .speech, settings: job.settings)
                     let client = providerClient
@@ -342,6 +370,8 @@ final class AppController: ObservableObject {
     }
 
     func finishCapture() {
+        // A phone transcribing a talk itself ends it with its final text.
+        if phoneTextMode { return }
         guard capturePhase == .recording else {
             if startTask != nil {
                 holdToTalkReleasePending = true
@@ -399,6 +429,7 @@ final class AppController: ObservableObject {
     }
 
     func cancelCapture() {
+        phoneTextMode = false
         readyTask?.cancel()
         readyTask = nil
         captureGeneration = UUID()
@@ -723,6 +754,7 @@ final class AppController: ObservableObject {
         case .screenshotWindow: takeScreenshot(.window)
         case .screenshotScreen: takeScreenshot(.screen)
         case .pasteLast: pasteLastDictation()
+        case .sendToPhone: sendSelectionToPhone()
         }
     }
 
@@ -858,6 +890,7 @@ final class AppController: ObservableObject {
 
     func saveSpeechCredential(_ value: String) throws {
         try CredentialStore.save(value, account: CredentialScope(.speech, settings: settings).account, rootURL: dataRoot)
+        phoneLink.refreshSpeechConfig()
         objectWillChange.send()
     }
 
@@ -877,11 +910,17 @@ final class AppController: ObservableObject {
         if capturePhase == .idle { captureHint = idleHint }
         objectWillChange.send()
         if previous.shortcutBindings != updated.shortcutBindings { restartHotkey() }
+        if previous.phoneLinkEnabled != updated.phoneLinkEnabled || previous.phoneClipboardToPhone != updated.phoneClipboardToPhone
+            || previous.phoneClipboardFromPhone != updated.phoneClipboardFromPhone {
+            phoneLink.apply(updated)
+        }
+        phoneLink.refreshSpeechConfig()
         return true
     }
 
     func selectSpeechProvider(_ provider: SpeechProvider) {
         store.updateSpeechProvider(provider)
+        phoneLink.refreshSpeechConfig()
         objectWillChange.send()
     }
 
@@ -1025,104 +1064,9 @@ final class AppController: ObservableObject {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 currentTranscript = raw
 
-                let snippet = VoiceSnippet.expansion(for: raw, snippets: speechSettings.snippets)
-                var corrected = DictionaryPass.apply(to: CorrectionRule.apply(to: raw, rules: speechSettings.correctionRules),
-                                                     vocabulary: speechSettings.customVocabulary, isCommonWord: DictionaryPass.systemKnows)
-                var learned: [String] = []
-                if snippet == nil, speechSettings.spokenCorrections, SpokenCorrection.mightContainCorrection(corrected) {
-                    capturePhase = .cleaning
-                    captureHint = "Checking corrections…"
-                    showOverlay()
-                    let outcome = await resolveSpokenCorrections(corrected, settings: speechSettings, apiKey: languageKey)
-                    try Task.checkCancellation()
-                    corrected = outcome.text
-                    learned = outcome.learned
-                }
-                var cleaned = snippet ?? corrected
-                var cleanupFailure: Error?
-                if speechSettings.cleanupEnabled && snippet == nil {
-                    capturePhase = .cleaning
-                    captureHint = "Polishing…"
-                    showOverlay()
-                    var cleanedChunks: [String] = []
-                    let editingBatches = TranscriptEditing.batches(corrected)
-                    cleanedChunks.reserveCapacity(editingBatches.count)
-                    for (index, rawChunk) in editingBatches.enumerated() {
-                        do {
-                            let cleanedChunk = try await providerClient.cleanTranscript(
-                                rawChunk,
-                                settings: speechSettings,
-                                apiKey: languageKey
-                            )
-                            cleanedChunks.append(cleanedChunk.isEmpty ? rawChunk : cleanedChunk)
-                        } catch is CancellationError {
-                            throw CancellationError()
-                        } catch {
-                            cleanupFailure = error
-                            cleanedChunks.append(contentsOf: editingBatches[index...])
-                            break
-                        }
-                    }
-                    cleaned = cleanedChunks.joined(separator: " ")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    try Task.checkCancellation()
-                }
-
-                try Task.checkCancellation()
-                guard captureGeneration == generation else { return }
-                let captureID = job?.id ?? UUID()
-                store.addNote(
-                    id: captureID,
-                    createdAt: job?.createdAt ?? Date(),
-                    rawText: raw,
-                    cleanedText: cleaned,
-                    duration: recording.duration,
-                    sourceApplication: sourceApplication,
-                    sourceBundleIdentifier: sourceBundleIdentifier
-                )
-                guard store.hasPersistedNote(captureID) else {
-                    throw ProviderClient.ClientError.provider(message: "The transcript could not be saved. Your audio is retained for recovery.")
-                }
-                if let job { try recovery.remove(job.id) }
-                currentTranscript = cleaned
-                capturePhase = .ready
-                captureHint = "Saved to notes"
-                showOverlay()
-
-                if let cleanupFailure {
-                    showTransientError("Transcript saved; cleanup unavailable: \(cleanupFailure.localizedDescription)")
-                } else if speechSettings.learnSpelledWords, let message = learn(learned) {
-                    showInfoNotice(message)
-                }
-
-                if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible && sourceBundleIdentifier != nil {
-                    do {
-                        try await TextInjector.paste(cleaned, into: sourceBundleIdentifier)
-                    } catch {
-                        guard captureGeneration == generation, !Task.isCancelled else { return }
-                        permissions.refresh()
-                        let needsPermission = (error as? TextInjectorError).map {
-                            if case .accessibilityPermissionDenied = $0 { return true }
-                            return false
-                        } ?? false
-                        NSLog("OpenScribe paste failed: %@", error.localizedDescription)
-                        showTransientError(needsPermission ? "Saved · paste permission needed" : "Saved · paste failed")
-                        if needsPermission {
-                            showPermissions()
-                        }
-                    }
-                }
-
-                if capturePhase == .ready {
-                    readyTask = Task { @MainActor [weak self] in
-                        do { try await Task.sleep(nanoseconds: 1_100_000_000) } catch { return }
-                        guard let self, self.captureGeneration == generation, self.capturePhase == .ready else { return }
-                        self.capturePhase = .idle
-                        self.captureHint = self.idleHint
-                        self.refreshOverlay()
-                        self.readyTask = nil
-                    }
-                }
+                try await completeDictation(raw: raw, speechSettings: speechSettings, languageKey: languageKey, duration: recording.duration,
+                                            sourceApplication: sourceApplication, sourceBundleIdentifier: sourceBundleIdentifier,
+                                            pasteResult: pasteResult, job: job, generation: generation)
             } catch is CancellationError {
                 return
             } catch {
@@ -1134,7 +1078,116 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// Everything after the words are known: snippets, dictionary, spoken corrections, cleanup, saving the note and
+    /// pasting. Shared by Mac recordings and text a paired phone transcribed itself.
+    private func completeDictation(raw: String, speechSettings: AppSettings, languageKey: String, duration: TimeInterval,
+                                   sourceApplication: String?, sourceBundleIdentifier: String?, pasteResult: Bool,
+                                   job: DictationJob?, generation: UUID) async throws {
+        let snippet = VoiceSnippet.expansion(for: raw, snippets: speechSettings.snippets)
+        var corrected = DictionaryPass.apply(to: CorrectionRule.apply(to: raw, rules: speechSettings.correctionRules),
+                                             vocabulary: speechSettings.customVocabulary, isCommonWord: DictionaryPass.systemKnows)
+        var learned: [String] = []
+        if snippet == nil, speechSettings.spokenCorrections, SpokenCorrection.mightContainCorrection(corrected) {
+            capturePhase = .cleaning
+            captureHint = "Checking corrections…"
+            showOverlay()
+            let outcome = await resolveSpokenCorrections(corrected, settings: speechSettings, apiKey: languageKey)
+            try Task.checkCancellation()
+            corrected = outcome.text
+            learned = outcome.learned
+        }
+        var cleaned = snippet ?? corrected
+        var cleanupFailure: Error?
+        if speechSettings.cleanupEnabled && snippet == nil {
+            capturePhase = .cleaning
+            captureHint = "Polishing…"
+            showOverlay()
+            var cleanedChunks: [String] = []
+            let editingBatches = TranscriptEditing.batches(corrected)
+            cleanedChunks.reserveCapacity(editingBatches.count)
+            for (index, rawChunk) in editingBatches.enumerated() {
+                do {
+                    let cleanedChunk = try await providerClient.cleanTranscript(
+                        rawChunk,
+                        settings: speechSettings,
+                        apiKey: languageKey
+                    )
+                    cleanedChunks.append(cleanedChunk.isEmpty ? rawChunk : cleanedChunk)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    cleanupFailure = error
+                    cleanedChunks.append(contentsOf: editingBatches[index...])
+                    break
+                }
+            }
+            cleaned = cleanedChunks.joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            try Task.checkCancellation()
+        }
+
+        try Task.checkCancellation()
+        guard captureGeneration == generation else { return }
+        let captureID = job?.id ?? UUID()
+        store.addNote(
+            id: captureID,
+            createdAt: job?.createdAt ?? Date(),
+            rawText: raw,
+            cleanedText: cleaned,
+            duration: duration,
+            sourceApplication: sourceApplication,
+            sourceBundleIdentifier: sourceBundleIdentifier
+        )
+        guard store.hasPersistedNote(captureID) else {
+            throw ProviderClient.ClientError.provider(message: "The transcript could not be saved. Your audio is retained for recovery.")
+        }
+        if let job { try recovery.remove(job.id) }
+        currentTranscript = cleaned
+        capturePhase = .ready
+        captureHint = "Saved to notes"
+        showOverlay()
+
+        if let cleanupFailure {
+            showTransientError("Transcript saved; cleanup unavailable: \(cleanupFailure.localizedDescription)")
+        } else if speechSettings.learnSpelledWords, let message = learn(learned) {
+            showInfoNotice(message)
+        }
+
+        if speechSettings.pasteIntoFocusedApp && pasteResult && !onboardingVisible && sourceBundleIdentifier != nil {
+            do {
+                try await TextInjector.paste(cleaned, into: sourceBundleIdentifier)
+            } catch {
+                guard captureGeneration == generation, !Task.isCancelled else { return }
+                permissions.refresh()
+                let needsPermission = (error as? TextInjectorError).map {
+                    if case .accessibilityPermissionDenied = $0 { return true }
+                    return false
+                } ?? false
+                NSLog("OpenScribe paste failed: %@", error.localizedDescription)
+                showTransientError(needsPermission ? "Saved · paste permission needed" : "Saved · paste failed")
+                if needsPermission {
+                    showPermissions()
+                }
+            }
+        }
+
+        if capturePhase == .ready {
+            readyTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 1_100_000_000) } catch { return }
+                guard let self, self.captureGeneration == generation, self.capturePhase == .ready else { return }
+                self.capturePhase = .idle
+                self.captureHint = self.idleHint
+                self.refreshOverlay()
+                self.readyTask = nil
+            }
+        }
+    }
+
     private func fail(with error: Error) {
+        if let talk = phoneTalk {
+            phoneLink.sendTalkState(talk, state: "failed", error: error.localizedDescription)
+            endPhoneTalk()
+        }
         permissions.refresh()
         if let recorderError = error as? RecorderError,
            case .microphonePermissionDenied = recorderError {
@@ -1439,4 +1492,201 @@ struct DictationGestureEvent: Equatable {
     }
     let kind: Kind
     let id = UUID()
+}
+
+// MARK: - Send to phone
+
+extension AppController {
+    /// Copies the selection (or uses the clipboard as it is) and puts it on every connected phone's clipboard.
+    func sendSelectionToPhone() {
+        guard settings.phoneLinkEnabled else {
+            flashFlowbar("Turn on Phone Link to send to your phone")
+            return
+        }
+        guard !phoneLink.connected.isEmpty else {
+            flashFlowbar("No phone connected")
+            return
+        }
+        Task { @MainActor in
+            let pasteboard = NSPasteboard.general
+            let before = pasteboard.changeCount
+            if TextInjector.copySelection() {
+                // Give the app a moment to put its selection on the clipboard. No change means nothing was selected.
+                for _ in 0..<12 where pasteboard.changeCount == before {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+            }
+            let result: PhoneLinkController.SendResult
+            if let text = pasteboard.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result = phoneLink.sendToPhones(text)
+            } else if let image = ClipboardImage.read(from: pasteboard) {
+                flashFlowbar("Sending image…")
+                result = await phoneLink.sendImage(image.data, mime: image.mime)
+            } else {
+                flashFlowbar("Nothing to send. Select or copy some text or an image first.")
+                return
+            }
+            switch result {
+            case .sent(let names): flashFlowbar("Sent to \(names)")
+            case .tooLarge: flashFlowbar("Too large to send to the phone")
+            case .noPhone: flashFlowbar("No phone connected")
+            case .needsCloud: flashFlowbar("Sign in to OpenScribe Cloud to send images")
+            case .failed: flashFlowbar("Couldn’t send to the phone")
+            }
+        }
+    }
+}
+
+// MARK: - Phone press-to-talk
+
+extension AppController: PhoneTalkHandler {
+    func phoneTalkStarted(session: PhoneTalkSession) -> String? {
+        if meetings.occupiesCapture { return "Finish the meeting recording on the Mac first." }
+        if isDictationBusy || pasteLastTask != nil { return "The Mac is already dictating." }
+        if credential(for: .speech).isEmpty { return "Add a speech API key in OpenScribe on the Mac." }
+        phoneTalk = session
+        phoneTalkStage = .starting
+        phoneAudioBacklog.removeAll()
+        startCapture(phone: session)
+        // startCapture reports its own problems on the Mac; tell the phone too if it didn't begin.
+        if phoneTalk == session, startTask == nil, capturePhase != .recording {
+            endPhoneTalk()
+            return lastError ?? "Dictation couldn't start on the Mac."
+        }
+        return nil
+    }
+
+    func phoneTalkAudio(session: PhoneTalkSession, pcm16: Data) {
+        guard phoneTalk == session else { return }
+        if recorder.isRecordingExternal {
+            recorder.appendExternal(pcm16: pcm16)
+        } else if startTask != nil, phoneAudioBacklog.count < 1_500 { // about a minute of 40 ms frames
+            phoneAudioBacklog.append(pcm16)
+        }
+    }
+
+    func phoneTalkEnded(session: PhoneTalkSession) {
+        guard phoneTalk == session else { return }
+        // A phone that transcribes itself dropped mid-talk: keep what it had already heard.
+        if phoneTextMode { return phoneTalkText(session: session, text: currentTranscript) }
+        finishCapture()
+    }
+
+    /// The transcription connection a paired phone may use itself. Only the transcription key is shared, and only
+    /// while "Transcribe on the phone" is on; an empty message tells phones to forget it.
+    func phoneSpeechMessage() -> PhoneLinkMessage {
+        var message = PhoneLinkMessage(t: "speech")
+        let current = settings
+        let key = credential(for: .speech)
+        guard current.phoneTranscribesLocally, !key.isEmpty else { return message }
+        message.provider = current.speechProvider.rawValue
+        message.url = current.speechBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        message.model = current.speechModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        message.key = key
+        if current.automaticStreaming, let capability = StreamingCapability.resolve(current) { message.streaming = "\(capability.transport)" }
+        message.terms = SpeechHints.terms(current, limit: 50)
+        return message
+    }
+
+    func phoneTextTalkStarted(session: PhoneTalkSession) -> String? {
+        if meetings.occupiesCapture { return "Finish the meeting recording on the Mac first." }
+        if isDictationBusy || pasteLastTask != nil { return "The Mac is already dictating." }
+        readyTask?.cancel()
+        readyTask = nil
+        captureGeneration = UUID()
+        phoneTalk = session
+        phoneTalkStage = .starting
+        phoneTextMode = true
+        phoneTalkStartedAt = Date()
+        // The text goes to whatever is focused on the Mac when the talk starts.
+        let target = activeApplicationMetadata()
+        recordingSourceApplication = target.name
+        recordingSourceBundleIdentifier = target.bundleIdentifier
+        phoneTalkTarget = (target.name, settings.pasteIntoFocusedApp && !onboardingVisible && target.bundleIdentifier != nil)
+        lastError = nil
+        currentTranscript = ""
+        noticeVisible = false
+        if settings.interactionSounds { sounds.play(.start) }
+        capturePhase = .recording
+        captureHint = "Listening on \(session.phoneName)"
+        showOverlay()
+        return nil
+    }
+
+    func phoneTalkPartial(session: PhoneTalkSession, text: String) {
+        guard phoneTalk == session, phoneTextMode, capturePhase == .recording else { return }
+        currentTranscript = text
+        refreshOverlay()
+    }
+
+    func phoneTalkText(session: PhoneTalkSession, text: String) {
+        guard phoneTalk == session, phoneTextMode else { return }
+        phoneTextMode = false
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return cancelCapture() }
+        if settings.interactionSounds { sounds.play(.stop) }
+        let sourceApplication = recordingSourceApplication, sourceBundleIdentifier = recordingSourceBundleIdentifier
+        recordingSourceApplication = nil
+        recordingSourceBundleIdentifier = nil
+        var speechSettings = store.settings
+        if let sourceBundleIdentifier, let tone = speechSettings.appWritingTones[sourceBundleIdentifier] { speechSettings.writingTone = tone }
+        let languageKey = credential(for: .languageModel, settings: speechSettings)
+        let duration = Date().timeIntervalSince(phoneTalkStartedAt)
+        let generation = captureGeneration
+        currentTranscript = raw
+        capturePhase = .transcribing
+        captureHint = "Writing…"
+        showOverlay()
+        processingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.captureGeneration == generation { self.processingTask = nil } }
+            do {
+                try await self.completeDictation(raw: raw, speechSettings: speechSettings, languageKey: languageKey, duration: duration,
+                                                 sourceApplication: sourceApplication, sourceBundleIdentifier: sourceBundleIdentifier,
+                                                 pasteResult: true, job: nil, generation: generation)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.captureGeneration == generation, !Task.isCancelled else { return }
+                NSLog("OpenScribe processing failed: %@", error.localizedDescription)
+                self.fail(with: error)
+            }
+        }
+    }
+
+    func phoneTalkCancelled(session: PhoneTalkSession) {
+        guard phoneTalk == session else { return }
+        cancelCapture()
+    }
+
+    /// Keeps the phone up to date as its dictation moves through the normal pipeline.
+    fileprivate func phoneTalkPhaseChanged() {
+        guard let talk = phoneTalk else { return }
+        switch capturePhase {
+        case .recording:
+            guard phoneTalkStage == .starting else { return }
+            phoneTalkStage = .recording
+            phoneLink.sendTalkState(talk, state: "recording", target: phoneTalkTarget.name, pasted: phoneTalkTarget.pastes)
+        case .transcribing, .cleaning:
+            guard phoneTalkStage == .recording else { return }
+            phoneTalkStage = .processing
+            phoneLink.sendTalkState(talk, state: "transcribing", target: phoneTalkTarget.name, pasted: phoneTalkTarget.pastes)
+        case .ready:
+            // A previous dictation's "Saved" moment can still be showing when the phone starts.
+            guard phoneTalkStage == .processing else { return }
+            phoneLink.sendTalkState(talk, state: "done", text: currentTranscript, target: phoneTalkTarget.name, pasted: phoneTalkTarget.pastes)
+            endPhoneTalk()
+        case .idle, .failed:
+            phoneLink.sendTalkState(talk, state: "discarded")
+            endPhoneTalk()
+        }
+    }
+
+    fileprivate func endPhoneTalk() {
+        if let talk = phoneTalk { phoneLink.talkFinishedOnMac(talk) }
+        phoneTalk = nil
+        phoneTextMode = false
+        phoneTalkTarget = (nil, false)
+        phoneAudioBacklog.removeAll()
+    }
 }

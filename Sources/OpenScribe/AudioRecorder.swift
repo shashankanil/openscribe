@@ -17,10 +17,15 @@ final class AudioRecorder: ObservableObject {
     private var startedAt: Date?
     private var tapInstalled = false
     private var preservesFiles = false
+    /// Set while recording from `appendExternal` rather than the audio engine.
+    private var externalFormat: AVAudioFormat?
+    private var externalFrames = 0
     var onInterruption: ((Error) -> Void)?
     private var configurationObserver: NSObjectProtocol?
 
     var duration: TimeInterval {
+        // Network audio arrives in bursts, so phone recordings are measured by the samples received.
+        if let externalFormat { return Double(externalFrames) / externalFormat.sampleRate }
         guard let startedAt else { return 0 }
         return Date().timeIntervalSince(startedAt)
     }
@@ -28,7 +33,7 @@ final class AudioRecorder: ObservableObject {
     init() {
         configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.isRecording, !self.engine.isRunning else { return }
+                guard let self, self.isRecording, self.externalFormat == nil, !self.engine.isRunning else { return }
                 self.onInterruption?(RecorderError.noInputDevice)
             }
         }
@@ -95,6 +100,46 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
+    /// Records audio pushed in by `appendExternal` (the paired phone's microphone) instead of a Mac input device.
+    /// Chunks, metering, `stop()` and `cancel()` behave exactly as for the Mac microphone.
+    func startExternal(directoryURL: URL, sampleRate: Double = PhoneLinkProtocol.audioSampleRate, liveSink: LiveAudioSink? = nil) throws {
+        guard !isRecording else { return }
+        // 16-bit WAV on disk; AVAudioFile converts the float buffers appended below.
+        guard let fileFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true),
+              let bufferFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else { throw RecorderError.noInputDevice }
+        preservesFiles = true
+        chunkStore.liveSink = liveSink
+        try chunkStore.begin(format: fileFormat, directoryURL: directoryURL)
+        externalFormat = bufferFormat
+        externalFrames = 0
+        inputLevel = 0
+        inputLevels = Array(repeating: 0.04, count: inputLevels.count)
+        isRecording = true
+        startedAt = Date()
+        peakLevel = 0
+    }
+
+    /// Appends signed 16-bit little-endian mono PCM from the phone.
+    func appendExternal(pcm16 data: Data) {
+        guard isRecording, let format = externalFormat else { return }
+        let frames = data.count / 2
+        guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = buffer.floatChannelData?[0] else { return }
+        data.withUnsafeBytes { raw in
+            for index in 0..<frames {
+                let sample = Int16(littleEndian: raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self))
+                channel[index] = Float(sample) / 32_768
+            }
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        externalFrames += frames
+        // Already on the main actor, so update the meter (and the quiet-capture peak) directly.
+        receiveMeterLevel(Self.level(from: buffer))
+        chunkStore.append(buffer)
+    }
+
+    var isRecordingExternal: Bool { isRecording && externalFormat != nil }
+
     private static func guarded<T>(_ body: () throws -> T) throws -> T {
         var result: Result<T, Error>?
         do { try ObjCTry.perform { result = Result { try body() } } }
@@ -138,6 +183,10 @@ final class AudioRecorder: ObservableObject {
     }
 
     private func stopEngine() {
+        if externalFormat != nil {
+            externalFormat = nil
+            return
+        }
         try? ObjCTry.perform {
             if self.engine.isRunning { self.engine.stop() }
             if self.tapInstalled { self.engine.inputNode.removeTap(onBus: 0) }

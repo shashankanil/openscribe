@@ -84,6 +84,7 @@ extension AppController {
         guard store.saveSettings(draft.applying(to: settings)) else {
             throw ConnectionError(message: "Couldn’t save the connection settings. Check local storage and try again.")
         }
+        phoneLink.refreshSpeechConfig()
         objectWillChange.send()
     }
 }

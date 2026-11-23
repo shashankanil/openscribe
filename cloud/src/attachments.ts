@@ -144,7 +144,11 @@ export async function purgeTombstonedAttachments(env: Env, userId: string, docum
 
 /** Delete every R2 object under u/{userId}/ (pages of 1000). Rows are deleted by the caller. */
 export async function purgeUserMedia(bucket: R2Bucket, userId: string): Promise<void> {
-  const prefix = userPrefix(userId);
+  await purgePrefix(bucket, userPrefix(userId));
+}
+
+/** Delete every R2 object under `prefix` (pages of 1000). */
+export async function purgePrefix(bucket: R2Bucket, prefix: string): Promise<void> {
   for (;;) {
     // Always list from the start: the previous page is gone, so no cursor is needed.
     const page = await bucket.list({ prefix, limit: 1000 });

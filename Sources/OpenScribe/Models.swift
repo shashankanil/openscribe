@@ -374,6 +374,14 @@ struct AppSettings: Codable, Equatable {
     /// Also upload screenshots and meeting recordings (stored in Cloudflare R2) when syncing.
     var cloudSyncScreenshots = true
     var cloudSyncRecordings = true
+    /// Accept paired Android phones on the local network (docs/PHONE-LINK.md).
+    var phoneLinkEnabled = false
+    /// Send text copied on the Mac to connected phones.
+    var phoneClipboardToPhone = true
+    /// Let phones put text on the Mac clipboard.
+    var phoneClipboardFromPhone = true
+    /// Paired phones transcribe press-to-talk themselves with this Mac's transcription connection, sending only text.
+    var phoneTranscribesLocally = true
 
     private enum CodingKeys: String, CodingKey {
         case speechProvider, speechBaseURL, speechModel
@@ -387,6 +395,7 @@ struct AppSettings: Codable, Equatable {
         case dictationMode, theme, interactionSounds, snippets, appWritingTones, microphoneDeviceUID
         case shortcuts, shortcutBindings, flowbarPlacement, meetingMicrophone, meetingSystemAudio, meetingSummarize
         case cloudSyncEnabled, cloudServerURL, cloudSyncScreenshots, cloudSyncRecordings
+        case phoneLinkEnabled, phoneClipboardToPhone, phoneClipboardFromPhone, phoneTranscribesLocally
     }
 
     init() {}
@@ -445,6 +454,13 @@ struct AppSettings: Codable, Equatable {
             ?? ShortcutDefaults.migrated(keyCode: shortcutKeyCode, modifiers: shortcutModifiers, display: shortcutDisplay, mode: dictationMode)
         shortcutBindings = try container.decodeIfPresent([String: [KeyShortcut]].self, forKey: .shortcutBindings)
             ?? shortcuts.mapValues { [$0] }
+        // Actions introduced in a later version get their default key once, if nothing else uses it.
+        // A removed shortcut is stored as an empty list, so this never brings one back.
+        for action in ShortcutDefaults.addedLater where shortcutBindings[action.rawValue] == nil {
+            guard let shortcut = ShortcutDefaults.bindings[action],
+                  !shortcutBindings.values.joined().contains(where: { $0.conflicts(with: shortcut) }) else { continue }
+            shortcutBindings[action.rawValue] = [shortcut]
+        }
         flowbarPlacement = try container.decodeIfPresent(FlowbarPlacement.self, forKey: .flowbarPlacement)
         meetingMicrophone = try container.decodeIfPresent(Bool.self, forKey: .meetingMicrophone) ?? true
         meetingSystemAudio = try container.decodeIfPresent(Bool.self, forKey: .meetingSystemAudio) ?? true
@@ -453,6 +469,10 @@ struct AppSettings: Codable, Equatable {
         cloudServerURL = try container.decodeIfPresent(String.self, forKey: .cloudServerURL) ?? ""
         cloudSyncScreenshots = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncScreenshots) ?? true
         cloudSyncRecordings = try container.decodeIfPresent(Bool.self, forKey: .cloudSyncRecordings) ?? true
+        phoneLinkEnabled = try container.decodeIfPresent(Bool.self, forKey: .phoneLinkEnabled) ?? false
+        phoneClipboardToPhone = try container.decodeIfPresent(Bool.self, forKey: .phoneClipboardToPhone) ?? true
+        phoneClipboardFromPhone = try container.decodeIfPresent(Bool.self, forKey: .phoneClipboardFromPhone) ?? true
+        phoneTranscribesLocally = try container.decodeIfPresent(Bool.self, forKey: .phoneTranscribesLocally) ?? true
     }
 }
 

@@ -3,6 +3,21 @@ import ApplicationServices
 import Foundation
 
 enum TextInjector {
+    /// Presses ⌘C in the focused app so its selection lands on the clipboard. Needs Accessibility access.
+    @MainActor
+    static func copySelection() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
+        guard AXIsProcessTrustedWithOptions(options),
+              let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: false) else { return false }
+        // Only ⌘, even while the shortcut's own modifiers are still held down.
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+
     @MainActor
     static func paste(_ text: String, into targetBundleIdentifier: String?) async throws {
         guard !text.isEmpty else { return }
@@ -28,6 +43,8 @@ enum TextInjector {
         guard pasteboard.setString(text, forType: .string) else {
             throw TextInjectorError.clipboardUnavailable
         }
+        // Tell clipboard managers and Phone Link this is a momentary write, not something the user copied.
+        pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
 
         let changeCount = pasteboard.changeCount
         if let targetApplication {

@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.6.2</string>
+	<string>0.7.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,15 +30,21 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>12</string>
+	<string>13</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>OpenScribe uses Accessibility to paste polished dictation into the focused app.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_openscribe._tcp</string>
+	</array>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>OpenScribe reads selected calendars to prompt you before scheduled meeting recordings. It does not modify events.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OpenScribe connects to your paired phone on this network for press-to-talk dictation and clipboard sync.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenScribe needs microphone access to turn your voice into text.</string>
 	<key>SUAutomaticallyUpdate</key>
