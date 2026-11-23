@@ -1,11 +1,12 @@
 import SwiftUI
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case notes, meetings, general, shortcuts, connections, ai, personalize, privacy, permissions, calendar
+    case notes, meetings, general, shortcuts, connections, ai, personalize, privacy, permissions, calendar, phone
     var id: String { rawValue }
     var title: String {
         switch self {
         case .calendar: return "Calendar"
+        case .phone: return "Phone"
         case .notes: return "Notes"
         case .meetings: return "Meetings"
         case .general: return "General"
@@ -20,6 +21,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .calendar: return "calendar"
+        case .phone: return "smartphone"
         case .notes: return "text.alignleft"
         case .meetings: return "person.2.wave.2"
         case .general: return "slider.horizontal.3"
@@ -33,7 +35,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
 
     static let library: [WorkspaceSection] = [.notes, .meetings, .calendar]
-    static let settings: [WorkspaceSection] = [.general, .shortcuts, .connections, .ai, .personalize, .privacy, .permissions]
+    static let settings: [WorkspaceSection] = [.general, .shortcuts, .connections, .ai, .phone, .personalize, .privacy, .permissions]
     var isSettings: Bool { Self.settings.contains(self) }
     var group: SidebarGroup { SidebarGroup.all.first { $0.sections.contains(self) }! }
 }
@@ -54,10 +56,11 @@ struct SidebarGroup: Identifiable, Equatable {
     static let preferences = SidebarGroup(id: "preferences", title: "Preferences", symbol: "slider.horizontal.3",
                                           sections: [.general, .shortcuts, .personalize], isSettings: true)
     static let ai = SidebarGroup(id: "ai", title: "AI", symbol: "sparkles", sections: [.connections, .ai], isSettings: true)
+    static let phone = SidebarGroup(id: "phone", title: "Phone", symbol: "smartphone", sections: [.phone], isSettings: true)
     static let privacy = SidebarGroup(id: "privacy", title: "Privacy & Access", symbol: "lock.shield",
                                       sections: [.privacy, .permissions], isSettings: true)
 
-    static let all: [SidebarGroup] = [.notes, .meetings, .preferences, .ai, .privacy]
+    static let all: [SidebarGroup] = [.notes, .meetings, .preferences, .ai, .phone, .privacy]
 
     /// Sub-items use the page title, except the group's own page.
     static func childTitle(_ section: WorkspaceSection) -> String {

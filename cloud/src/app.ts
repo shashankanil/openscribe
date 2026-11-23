@@ -24,6 +24,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_CAPTION_CHARS,
   MEDIA_TYPES,
+  purgePrefix,
   purgeTombstonedAttachments,
   purgeUserMedia,
   r2Key,
@@ -35,10 +36,26 @@ import { randomToken } from "./crypto";
 import { deleteDocument, MAX_BATCH_BYTES, MAX_DOCUMENTS_PER_BATCH, upsertDocuments } from "./documents";
 import { exchangeGoogleCode, googleAuthorizeUrl, GoogleAuthError, upsertUser } from "./google";
 import { consentPage, errorPage, HTML_HEADERS, landingPage, privacyPage, termsPage } from "./html";
+import {
+  authenticateLinkPrincipal,
+  DEVICE_ID_PATTERN,
+  getLinkBlob,
+  isValidBlobId,
+  issueLinkToken,
+  LINK_BLOB_TTL_MS,
+  linkBlobKey,
+  linkPrefix,
+  MAX_DEVICE_NAME_CHARS,
+  MAX_LINK_BLOB_BYTES,
+  revokeLinkDevice,
+  ROOM_PATTERN,
+  type LinkPrincipal,
+} from "./link";
+import { LINK_ROLE_HEADER } from "./link-relay";
 import { serveMedia } from "./media";
 
 export type Bindings = Env & { OAUTH_PROVIDER: OAuthHelpers };
-type Variables = { principal: AppPrincipal };
+type Variables = { principal: AppPrincipal; linkPrincipal: LinkPrincipal };
 type AppContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
 /** Scopes this server grants. `openscribe:read` is the only resource scope. */
@@ -319,7 +336,9 @@ api.delete("/account", async (c) => {
     cursor = page.cursor;
   } while (cursor);
   await purgeUserMedia(c.env.MEDIA, userId);
+  await purgePrefix(c.env.MEDIA, linkPrefix(userId));
   await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM link_devices WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM attachments WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM documents WHERE user_id = ?1").bind(userId),
     c.env.DB.prepare("DELETE FROM app_tokens WHERE user_id = ?1").bind(userId),
@@ -431,6 +450,98 @@ api.delete("/attachments/:documentId/:attachmentId", async (c) => {
   return c.body(null, 204);
 });
 
+// ---------------------------------------------------------------------------------------------
+// Phone Link (docs/PHONE-LINK.md): phone tokens, relay, images. Mounted before `/api/v1` so its
+// own auth (Mac app token or phone token) answers first; the app-token middleware never sees it.
+
+const link = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+link.use("*", async (c, next) => {
+  const principal = await authenticateLinkPrincipal(c.env.DB, c.req.raw);
+  if (!principal) return jsonError(401, "unauthorized", "Missing, invalid or revoked token");
+  c.set("linkPrincipal", principal);
+  await next();
+  // A 101 response carries the WebSocket and its headers can't change.
+  if (c.res.status !== 101) c.header("Cache-Control", "no-store");
+});
+
+const requireMac = (c: AppContext): Response | null =>
+  c.get("linkPrincipal").role === "mac" ? null : jsonError(403, "forbidden", "Only the Mac's app token can manage phones");
+
+link.post("/devices", async (c) => {
+  const forbidden = requireMac(c);
+  if (forbidden) return forbidden;
+  const text = await readBodyLimited(c.req.raw, 4096);
+  if (text === null) return jsonError(413, "payload_too_large");
+  let body: { deviceId?: unknown; name?: unknown };
+  try {
+    body = JSON.parse(text) ?? {};
+  } catch {
+    return jsonError(400, "invalid_json");
+  }
+  const { deviceId, name = "" } = body;
+  if (typeof deviceId !== "string" || !DEVICE_ID_PATTERN.test(deviceId)) {
+    return jsonError(400, "invalid_device_id", "deviceId must be 1-100 characters of [A-Za-z0-9-]");
+  }
+  if (typeof name !== "string") return jsonError(400, "invalid_request", "name must be a string");
+  const cleanName = Array.from(name.replace(/[\x00-\x1f\x7f]/g, "").trim()).slice(0, MAX_DEVICE_NAME_CHARS).join("");
+  const token = await issueLinkToken(c.env.DB, c.get("linkPrincipal").userId, deviceId, cleanName);
+  return c.json({ token });
+});
+
+link.delete("/devices/:deviceId", async (c) => {
+  const forbidden = requireMac(c);
+  if (forbidden) return forbidden;
+  const deviceId = c.req.param("deviceId");
+  if (!DEVICE_ID_PATTERN.test(deviceId)) return jsonError(400, "invalid_device_id");
+  await revokeLinkDevice(c.env.DB, c.get("linkPrincipal").userId, deviceId);
+  return c.json({ revoked: true });
+});
+
+link.get("/relay/:room", async (c) => {
+  if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") return jsonError(426, "upgrade_required", "Expected a WebSocket upgrade");
+  const room = c.req.param("room");
+  if (!ROOM_PATTERN.test(room)) return jsonError(400, "invalid_room", "room must be 32 lowercase hex characters");
+  const { userId, role } = c.get("linkPrincipal");
+  const stub = c.env.LINK_RELAY.get(c.env.LINK_RELAY.idFromName(`${userId}:${room}`));
+  const headers = new Headers(c.req.raw.headers);
+  headers.delete("Authorization");
+  headers.set(LINK_ROLE_HEADER, role);
+  return stub.fetch(new Request(c.req.url, { method: "GET", headers }));
+});
+
+link.put("/blobs", async (c) => {
+  const contentType = (c.req.header("Content-Type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (contentType !== "application/octet-stream") return jsonError(415, "unsupported_media_type", "Expected application/octet-stream");
+  const lengthHeader = c.req.header("Content-Length");
+  if (!lengthHeader || !/^\d+$/.test(lengthHeader)) return jsonError(411, "length_required");
+  const bytes = Number(lengthHeader);
+  if (bytes > MAX_LINK_BLOB_BYTES) return jsonError(413, "too_large", `At most ${MAX_LINK_BLOB_BYTES} bytes`);
+  if (bytes === 0 || !c.req.raw.body) return jsonError(400, "empty_body");
+
+  const { userId } = c.get("linkPrincipal");
+  const id = crypto.randomUUID();
+  const uploadedAt = Date.now();
+  // FixedLengthStream gives R2 the length up front and fails the put if the body is short or long.
+  const body = c.req.raw.body.pipeThrough(new FixedLengthStream(bytes));
+  await c.env.MEDIA.put(linkBlobKey(userId, id), body, {
+    httpMetadata: { contentType: "application/octet-stream" },
+    customMetadata: { uploadedAt: String(uploadedAt) },
+  });
+  return c.json({ id, expiresAt: uploadedAt + LINK_BLOB_TTL_MS });
+});
+
+link.get("/blobs/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!isValidBlobId(id)) return jsonError(404, "not_found");
+  const object = await getLinkBlob(c.env.MEDIA, c.get("linkPrincipal").userId, id);
+  if (!object) return jsonError(404, "not_found");
+  return new Response(object.body, {
+    headers: { "Content-Type": "application/octet-stream", "Content-Length": String(object.size), "Cache-Control": "no-store" },
+  });
+});
+
+app.route("/api/v1/link", link);
 app.route("/api/v1", api);
 
 app.notFound(() => jsonError(404, "not_found"));

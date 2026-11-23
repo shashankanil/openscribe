@@ -471,6 +471,48 @@ final class CloudSyncController: ObservableObject {
         private enum CodingKeys: String, CodingKey { case errors }
     }
 
+    // MARK: Phone Link (docs/PHONE-LINK.md, "OpenScribe Cloud: relay and images")
+
+    /// The server and app token for Phone Link's relay and images, or nil when not signed in with Google.
+    var linkAccess: (server: URL, token: String)? {
+        guard signedIn, let token else { return nil }
+        return (server, token)
+    }
+
+    /// A token for one paired phone, tied to this account. Minting again revokes the phone's previous token.
+    func mintPhoneToken(deviceID: String, name: String) async throws -> String {
+        guard let token else { throw CloudError.unauthorized }
+        struct Body: Encodable { let deviceId: String; let name: String }
+        struct Reply: Decodable { let token: String }
+        let data = try await request("api/v1/link/devices", method: "POST", token: token,
+                                     body: try JSONEncoder().encode(Body(deviceId: deviceID, name: name)))
+        return try JSONDecoder().decode(Reply.self, from: data).token
+    }
+
+    func revokePhoneToken(deviceID: String) async {
+        guard let token else { return }
+        _ = try? await request("api/v1/link/devices/\(Self.pathComponent(deviceID))", method: "DELETE", token: token)
+    }
+
+    /// Stores an encrypted clipboard image for two days and returns its id.
+    func uploadLinkBlob(_ blob: Data) async throws -> String {
+        guard let token else { throw CloudError.unauthorized }
+        var request = URLRequest(url: server.appendingPathComponent("api/v1/link/blobs"))
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 120
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.upload(for: request, from: blob)
+        try Self.check(response, data: data)
+        struct Reply: Decodable { let id: String }
+        return try JSONDecoder().decode(Reply.self, from: data).id
+    }
+
+    func downloadLinkBlob(_ id: String) async throws -> Data {
+        guard let token else { throw CloudError.unauthorized }
+        return try await request("api/v1/link/blobs/\(Self.pathComponent(id))", token: token)
+    }
+
     private func request(_ path: String, method: String = "GET", token: String, body: Data? = nil) async throws -> Data {
         var request = URLRequest(url: server.appendingPathComponent(path))
         request.httpMethod = method

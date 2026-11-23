@@ -36,10 +36,21 @@
   "r2_buckets": [
     {
       // Screenshots and meeting recordings, keyed u/{userId}/{documentId}/{attachmentId}.
+      // Also Phone Link clipboard images at link/{userId}/{blobId} (2-day lifecycle rule, see README).
       "binding": "MEDIA",
       "bucket_name": "openscribe-media"
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        // Phone Link relay: one object per `${userId}:${room}`, holding at most one mac and one phone socket.
+        "name": "LINK_RELAY",
+        "class_name": "LinkRelay"
+      }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LinkRelay"] }],
   "observability": { "enabled": true },
   "dev": { "port": 8788 }
 }

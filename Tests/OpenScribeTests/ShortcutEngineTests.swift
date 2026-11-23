@@ -62,6 +62,21 @@ final class ShortcutEngineTests: XCTestCase {
         XCTAssertTrue(settings.shortcuts(for: .meeting).isEmpty)
     }
 
+    func testNewActionsGetTheirDefaultOnceButStayRemovable() throws {
+        let saved = #"{"shortcutBindings": {"dictate": [{"keyCode": 49, "modifiers": 524288, "display": "⌥ Space"}]}}"#
+        var settings = try JSONDecoder().decode(AppSettings.self, from: Data(saved.utf8))
+        XCTAssertEqual(settings.shortcut(for: .sendToPhone), ShortcutDefaults.bindings[.sendToPhone])
+        XCTAssertTrue(settings.shortcuts(for: .meeting).isEmpty, "Only actions added later get a default")
+
+        settings.remove(ShortcutDefaults.bindings[.sendToPhone]!, from: .sendToPhone)
+        let reloaded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertNil(reloaded.shortcut(for: .sendToPhone), "A removed shortcut must not come back")
+
+        let taken = #"{"shortcutBindings": {"meeting": [{"keyCode": 35, "modifiers": 655360, "display": "⌥⇧ P"}]}}"#
+        let conflicting = try JSONDecoder().decode(AppSettings.self, from: Data(taken.utf8))
+        XCTAssertNil(conflicting.shortcut(for: .sendToPhone), "The default never takes a key the user already uses")
+    }
+
     func testShortcutRules() {
         XCTAssertTrue(KeyShortcut.rightCommand.isModifierOnly)
         XCTAssertEqual(KeyShortcut.rightCommand.display, "Right ⌘")

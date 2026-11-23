@@ -1,0 +1,14 @@
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.kotlin/
+.cxx/
+# Release signing stays out of the repo: keystores and their passwords live only on the release machine.
+*.jks
+*.keystore
+keystore.properties

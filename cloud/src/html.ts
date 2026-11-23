@@ -20,6 +20,9 @@ const STYLE = `
   button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .warn { border-left: 3px solid #d98b00; padding-left: 12px; }
+  .downloads { display:flex; flex-wrap:wrap; gap:10px; margin: 20px 0 8px; }
+  a.button { display:inline-block; text-decoration:none; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-weight: 600; }
+  a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 `;
 
 function page(title: string, body: string): string {
@@ -36,12 +39,20 @@ export const HTML_HEADERS = {
   "Referrer-Policy": "no-referrer",
 };
 
+/** Always the newest Android build: each GitHub release attaches it under this fixed name. */
+export const ANDROID_DOWNLOAD_URL = "https://github.com/shashankanil/openscribe/releases/latest/download/OpenScribe-Android.apk";
+
 export function landingPage(publicUrl: string, downloadUrl: string): string {
   const mcp = `${publicUrl}/mcp`;
   return page(
     "OpenScribe Cloud",
     `<h1>OpenScribe Cloud</h1>
 <p class="muted">Ask Claude, ChatGPT and other AI assistants about your OpenScribe notes and meetings.</p>
+<div class="downloads">
+  <a class="button primary" href="${escapeHtml(downloadUrl)}">Download for macOS</a>
+  <a class="button" href="${ANDROID_DOWNLOAD_URL}">Download for Android</a>
+</div>
+<p class="muted">The Android app pairs with OpenScribe on your Mac (Settings → Phone): hold to dictate into your Mac, and share the clipboard both ways. Open this page on your phone and tap Download for Android, or scan the code under Phone on your Mac.</p>
 
 <h2>1. Turn on sync in the app</h2>
 <p>Install <a href="${escapeHtml(downloadUrl)}">OpenScribe for macOS</a>, open Settings, and sign in with Google under Cloud sync. Sync is off until you turn it on, and you can delete everything from the server at any time.</p>

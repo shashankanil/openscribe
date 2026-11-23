@@ -6,11 +6,15 @@
  * - `/callback`       Google redirect URI for both MCP and desktop-app sign-in.
  * - `/app/login`      Desktop app sign-in → openscribe://auth?token=…&state=…
  * - `/api/v1/*`       Sync API (app tokens).
+ * - `/api/v1/link/*`  Phone Link relay (WebSocket → LinkRelay Durable Object) and images (app or phone tokens).
  */
 import OAuthProvider, { type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
 import { app, READ_SCOPE, SCOPES_SUPPORTED } from "./app";
 import { createOpenScribeServer } from "./mcp";
+
+/** Durable Object classes must be exported from the main module (see wrangler.jsonc). */
+export { LinkRelay } from "./link-relay";
 
 export interface McpProps extends Record<string, unknown> {
   userId: string;

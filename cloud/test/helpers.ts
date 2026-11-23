@@ -38,7 +38,7 @@ export const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toIS
 
 /** Storage persists across tests in a file; start each test from an empty database. */
 export async function resetDb(db: D1Database): Promise<void> {
-  await db.batch([db.prepare("DELETE FROM attachments"), db.prepare("DELETE FROM documents"), db.prepare("DELETE FROM app_tokens"), db.prepare("DELETE FROM users")]);
+  await db.batch([db.prepare("DELETE FROM link_devices"), db.prepare("DELETE FROM attachments"), db.prepare("DELETE FROM documents"), db.prepare("DELETE FROM app_tokens"), db.prepare("DELETE FROM users")]);
 }
 
 export const media = (userId: string): MediaAccess => mediaAccess(env, userId);

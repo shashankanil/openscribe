@@ -11,6 +11,7 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
     case screenshotWindow
     case screenshotScreen
     case pasteLast
+    case sendToPhone
 
     var id: String { rawValue }
 
@@ -23,6 +24,7 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .screenshotWindow: return "Screenshot a window"
         case .screenshotScreen: return "Screenshot the screen"
         case .pasteLast: return "Paste last dictation"
+        case .sendToPhone: return "Send to phone"
         }
     }
 
@@ -35,6 +37,7 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .screenshotWindow: return "Click a window. Saved to today’s note."
         case .screenshotScreen: return "The screen under your pointer. Saved to today’s note."
         case .pasteLast: return "Pastes your latest dictation into the focused app."
+        case .sendToPhone: return "Copies the selected text to your phone’s clipboard. With nothing selected, sends what you last copied."
         }
     }
 
@@ -47,6 +50,7 @@ enum ShortcutAction: String, Codable, CaseIterable, Identifiable {
         case .screenshotWindow: return "macwindow"
         case .screenshotScreen: return "display"
         case .pasteLast: return "doc.on.clipboard"
+        case .sendToPhone: return "iphone.and.arrow.forward"
         }
     }
 
@@ -149,7 +153,11 @@ enum ShortcutDefaults {
         .screenshotScreen: KeyShortcut(keyCode: 20, modifiers: [.option, .shift]),
         .screenshotArea: KeyShortcut(keyCode: 21, modifiers: [.option, .shift]),
         .screenshotWindow: KeyShortcut(keyCode: 23, modifiers: [.option, .shift]),
+        .sendToPhone: KeyShortcut(keyCode: 35, modifiers: [.option, .shift]),
     ]
+
+    /// Actions added after the first release with shortcut lists; older saved settings get their defaults on load.
+    static let addedLater: [ShortcutAction] = [.sendToPhone]
 
     static var lists: [String: [KeyShortcut]] { Dictionary(uniqueKeysWithValues: bindings.map { ($0.key.rawValue, [$0.value]) }) }
 

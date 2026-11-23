@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The Whisperlight tile from the Mac app's logo. -->
+    <color name="launcher_background">#14171F</color>
+    <color name="paper">#F9F7F3</color>
+</resources>

@@ -49,7 +49,7 @@ struct ProviderConnectionCard: View {
             Button("Remove key", role: .destructive) {
                 do {
                     try CredentialStore.delete(account: draft.scope.account, rootURL: controller.storageRoot)
-                    failure = nil; controller.objectWillChange.send(); controller.flash("API key removed")
+                    failure = nil; controller.phoneLink.refreshSpeechConfig(); controller.objectWillChange.send(); controller.flash("API key removed")
                 } catch { failure = error.localizedDescription }
             }
             Button("Cancel", role: .cancel) {}
@@ -69,6 +69,11 @@ struct ProviderConnectionEditor: View {
     @State private var advanced = false
     @State private var failure: String?
     @FocusState private var keyFocused: Bool
+    /// The provider's answer to "does this key work, and which models does it offer?"
+    private enum Catalog: Equatable { case idle, loading, loaded([ProviderModel]), failed(String) }
+    @State private var catalog = Catalog.idle
+    @State private var modelSearch = ""
+    @State private var testTask: Task<Void, Never>?
 
     init(controller: AppController, purpose: CredentialKey, onClose: @escaping () -> Void) {
         self.controller = controller; self.purpose = purpose; self.onClose = onClose
@@ -156,9 +161,22 @@ struct ProviderConnectionEditor: View {
                 Button("Save connection") { save() }.buttonStyle(.flowPrimary).keyboardShortcut(.defaultAction).disabled(!readyToSave)
             }.padding(.horizontal, 24).padding(.vertical, 18)
         }.frame(width: 675).background(FlowTheme.background).foregroundStyle(FlowTheme.ink).tint(FlowTheme.accent)
-            .onAppear { readKeys() }
-            .onChange(of: draft.scope.account) { _, _ in readKeys() }
-            .onChange(of: key) { _, _ in failure = nil }
+            .onAppear { readKeys(); testSavedKey() }
+            .onChange(of: draft.scope.account) { _, _ in readKeys(); catalog = .idle; modelSearch = ""; testSavedKey() }
+            .onChange(of: key) { _, value in
+                failure = nil
+                // Test a pasted key once typing settles.
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                testTask?.cancel()
+                if trimmed.count >= 16 {
+                    testTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        if !Task.isCancelled { testKey() }
+                    }
+                } else if trimmed.isEmpty { testSavedKey() }
+            }
+            .onChange(of: reuseKey) { _, reuse in if reuse { testKey() } }
+            .onDisappear { testTask?.cancel() }
     }
 
     private var keySection: some View {
@@ -184,22 +202,138 @@ struct ProviderConnectionEditor: View {
                 Toggle(purpose == .speech ? "Use my saved writing key" : "Use my saved transcription key", isOn: $reuseKey)
                     .toggleStyle(.checkbox).font(.system(size: 12))
             }
-            Text("Saving stores the key. Provider access is checked when you use it.")
-                .font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button(catalog == .loading ? "Testing…" : "Test key") { testKey() }
+                    .buttonStyle(.flow(.secondary, size: .small))
+                    .disabled(keyToTest == nil || catalog == .loading || draft.validationMessage != nil)
+                catalogStatus
+            }
         }
     }
+
+    @ViewBuilder private var catalogStatus: some View {
+        switch catalog {
+        case .idle:
+            Text(keyToTest == nil ? "Paste a key to check it and load models." : "Checks the key and loads this provider's models.")
+                .font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint)
+        case .loading:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking with \(draft.title)…").font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkMuted)
+            }
+        case .loaded(let models):
+            HStack(spacing: 6) {
+                Circle().fill(FlowTheme.success).frame(width: 6, height: 6)
+                Text(models.isEmpty ? "Key works" : "Key works · \(models.count) model\(models.count == 1 ? "" : "s")")
+                    .font(.system(size: 11.5, weight: .medium)).foregroundStyle(FlowTheme.ink)
+            }
+        case .failed(let message):
+            Text(message).font(.system(size: 11.5)).foregroundStyle(FlowTheme.recording)
+                .fixedSize(horizontal: false, vertical: true).lineLimit(3)
+        }
+    }
+    private var loadedModels: [ProviderModel] { if case .loaded(let models) = catalog { models } else { [] } }
+
     private var modelField: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Model").font(.system(size: 12, weight: .medium))
                 Spacer()
-                if !draft.isCustom {
+                if !draft.isCustom && loadedModels.isEmpty {
                     Menu("Presets") {
                         ForEach(draft.models, id: \.self) { model in Button(model) { draft.model = model } }
                     }.font(.system(size: 11.5)).fixedSize()
                 }
             }
-            TextField("Model ID", text: $draft.model).flowField().font(.system(size: 12, design: .monospaced)).accessibilityLabel("Model ID")
+            if !loadedModels.isEmpty { modelPicker(loadedModels) }
+            TextField(loadedModels.isEmpty ? "Model ID" : "Or type a model ID", text: $draft.model)
+                .flowField().font(.system(size: 12, design: .monospaced)).accessibilityLabel("Model ID")
+            let chosen = draft.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !loadedModels.isEmpty, !chosen.isEmpty, !loadedModels.contains(where: { $0.id == chosen }) {
+                Text("\(chosen) isn’t in \(draft.title)’s list for this key, so it may not work.")
+                    .font(.system(size: 11)).foregroundStyle(FlowTheme.warning).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func modelPicker(_ models: [ProviderModel]) -> some View {
+        let query = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let shown = query.isEmpty ? models : models.filter { $0.id.lowercased().contains(query) || ($0.name?.lowercased().contains(query) ?? false) }
+        return VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(FlowTheme.inkFaint)
+                TextField("Search \(models.count) models", text: $modelSearch).textFieldStyle(.plain).font(.system(size: 12))
+            }.padding(.horizontal, 10).padding(.vertical, 8)
+            Rectangle().fill(FlowTheme.line).frame(height: 1)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(shown) { model in
+                            let selected = model.id == draft.model.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Button { draft.model = model.id } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(model.id).font(.system(size: 12, weight: selected ? .semibold : .regular, design: .monospaced))
+                                            .lineLimit(1).truncationMode(.middle)
+                                        if let name = model.name, name != model.id {
+                                            Text(name).font(.system(size: 11)).foregroundStyle(FlowTheme.inkMuted).lineLimit(1)
+                                        }
+                                    }
+                                    Spacer(minLength: 0)
+                                    if selected { Circle().fill(FlowTheme.accent).frame(width: 7, height: 7) }
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(selected ? FlowTheme.accentSoft : .clear)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).id(model.id)
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                        }
+                        if shown.isEmpty {
+                            Text("No models match “\(modelSearch)”").font(.system(size: 11.5)).foregroundStyle(FlowTheme.inkFaint).padding(12)
+                        }
+                    }
+                }
+                .onAppear { proxy.scrollTo(draft.model.trimmingCharacters(in: .whitespacesAndNewlines), anchor: .center) }
+            }
+            .frame(height: 168)
+        }
+        .background(FlowTheme.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(FlowTheme.line, lineWidth: 1))
+    }
+
+    /// The key a test would use: the one being typed, the other connection's key when reusing it, or the saved one.
+    private var keyToTest: String? {
+        let typed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { return typed }
+        let account = reuseKey ? draft.otherScope.account : draft.scope.account
+        guard reuseKey || hasSavedKey else { return nil }
+        let saved = (try? CredentialStore.readChecked(account: account, rootURL: controller.storageRoot)) ?? nil
+        return saved?.isEmpty == false ? saved : nil
+    }
+
+    private func testSavedKey() {
+        if hasSavedKey && key.isEmpty && draft.validationMessage == nil { testKey() }
+    }
+
+    private func testKey() {
+        guard let apiKey = keyToTest, draft.validationMessage == nil else { return }
+        testTask?.cancel()
+        catalog = .loading
+        let request = (purpose: draft.purpose, provider: draft.providerID, title: draft.title, endpoint: draft.endpoint)
+        let account = draft.scope.account
+        testTask = Task { @MainActor in
+            do {
+                let models = try await ProviderModelCatalog.fetch(purpose: request.purpose, providerID: request.provider, title: request.title,
+                                                                  endpoint: request.endpoint, apiKey: apiKey)
+                guard !Task.isCancelled, account == draft.scope.account else { return }
+                catalog = .loaded(models)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, account == draft.scope.account else { return }
+                catalog = .failed((error as? URLError)?.code == .cancelled ? "Cancelled." : error.localizedDescription)
+            }
         }
     }
     private var endpointField: some View {

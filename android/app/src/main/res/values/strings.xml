@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenScribe</string>
+    <string name="share_label">Send to Mac clipboard</string>
+    <string name="tile_send_clipboard">Send clipboard</string>
+    <string name="talk_key_service_label">OpenScribe</string>
+    <string name="talk_key_service_summary">Talk button, and copies to your Mac</string>
+    <string name="talk_key_service_description">Lets OpenScribe work with your Mac from any app: hold a phone button you choose (such as volume down) to dictate, and send what you copy to your Mac\'s clipboard. OpenScribe watches only that button and the moment you copy, such as a tap on a Copy button. It does not read your screen or what you type, and copies marked sensitive, like passwords, are never sent.</string>
+</resources>
